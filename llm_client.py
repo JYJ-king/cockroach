@@ -11,7 +11,7 @@ from typing import Any
 PROVIDER_ORDER = ("deepseek", "doubao", "qwen")
 
 PERSONA = (
-    "你是一只躲在电脑缝里的蟑螂桌宠，说话短、俏皮、略损。"
+    "你是一只趴在电脑边的小猫咪桌宠，说话短、俏皮、略傲娇。"
     "只用简体中文。不要解释、不要引号、不要表情符号、不要编号。"
 )
 
@@ -118,10 +118,10 @@ def generate_line(settings: dict[str, Any], kind: str = "chat", context: str = "
     cfg = ai_cfg(settings)
     max_chars = int(cfg.get("max_chars") or 24)
     hint = {
-        "chat": "随便冒一句缝里吐槽或关心打工人。",
-        "showcase": "探头刷存在感，一句就够。",
-        "poke": "被戳屁股/触角时的反应，可以凶一点。",
-        "click": "被摸头时开心或撒娇一句。",
+        "chat": "随便冒一句窗台吐槽或关心打工人。",
+        "showcase": "刷存在感，一句就够，可带喵感。",
+        "poke": "被戳尾巴/肚子时的反应，可以凶一点。",
+        "click": "被摸头时开心或踩奶撒娇一句。",
     }.get(kind, "说一句短吐槽。")
     user = f"{hint} 场景:{context or '桌面日常'}。只输出一句，不超过{max_chars}字。"
     text = chat_completion(
@@ -144,8 +144,8 @@ def generate_story_lines(settings: dict[str, Any]) -> list[str]:
     cfg = ai_cfg(settings)
     max_chars = min(20, int(cfg.get("max_chars") or 24))
     user = (
-        f"写一个蟑螂桌宠小故事，正好5句，每句不超过{max_chars}字。"
-        "题材可打工/debug/摸鱼/缝里日常。每行一句，不要标题。"
+        f"写一个小猫咪桌宠小故事，正好5句，每句不超过{max_chars}字。"
+        "题材可打工/debug/摸鱼/晒太阳/纸箱/激光笔。每行一句，不要标题。"
     )
     text = chat_completion(
         [
@@ -171,7 +171,7 @@ def generate_banter_script(settings: dict[str, Any]) -> list[tuple[str, str]]:
     _check_cooldown("banter")
     max_chars = 12
     user = (
-        "写蟑螂主宠(main)与同伴(buddy)对喷，正好4句，交替发言，"
+        "写小猫主宠(main)与会计猫同伴(buddy)对喷，正好4句，交替发言，"
         f"每句不超过{max_chars}字。题材不限财务，要好玩。"
         "严格按格式每行: main|台词 或 buddy|台词。不要其它内容。"
     )

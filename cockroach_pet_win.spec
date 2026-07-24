@@ -11,6 +11,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('cockroach.png', '.'),
+        ('image', 'image'),
         ('packs', 'packs'),
         ('skins', 'skins'),
     ],

@@ -134,9 +134,10 @@ class DesktopChrome:
         menu.addItem_(NSMenuItem.separatorItem())
         add("下一个皮肤", "next_skin")
         add("会计对喷", "banter")
-        add("开关会计蟑螂", "toggle_buddy")
+        add("开关会计猫", "toggle_buddy")
         add("故事大会", "story")
         add("开关休息提醒", "toggle_rest")
+        add("开关鼠标寻访", "toggle_mouse_seek")
         add("开关 AI", "toggle_ai")
         add("切换 AI 厂商", "cycle_ai_provider")
         add("显示称号", "titles")
@@ -146,7 +147,7 @@ class DesktopChrome:
 
         item.setMenu_(menu)
         self._status_item = item
-        print("菜单栏: 点击 🪳 图标")
+        print("菜单栏: 点击 🐱 图标")
 
     def _start_win_tray(self) -> None:
         try:
@@ -179,9 +180,10 @@ class DesktopChrome:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("下一个皮肤", on("next_skin")),
             pystray.MenuItem("会计对喷", on("banter")),
-            pystray.MenuItem("开关会计蟑螂", on("toggle_buddy")),
+            pystray.MenuItem("开关会计猫", on("toggle_buddy")),
             pystray.MenuItem("故事大会", on("story")),
             pystray.MenuItem("开关休息提醒", on("toggle_rest")),
+            pystray.MenuItem("开关鼠标寻访", on("toggle_mouse_seek")),
             pystray.MenuItem("开关 AI", on("toggle_ai")),
             pystray.MenuItem("切换 AI 厂商", on("cycle_ai_provider")),
             pystray.MenuItem("显示称号", on("titles")),
@@ -189,7 +191,7 @@ class DesktopChrome:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", on("quit")),
         )
-        icon = pystray.Icon("cockroach_pet", img, "蟑螂桌宠", menu)
+        icon = pystray.Icon("cockroach_pet", img, "小猫桌宠", menu)
         self._tray_icon = icon
-        print("系统托盘: 右键蟑螂图标")
+        print("系统托盘: 右键小猫图标")
         icon.run()

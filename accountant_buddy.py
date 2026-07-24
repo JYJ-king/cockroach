@@ -1,4 +1,4 @@
-"""会计蟑螂同伴：同窗右侧槽位，偶尔与主宠对喷黑话。"""
+"""会计猫同伴：同窗右侧槽位，偶尔与主宠对喷黑话。"""
 
 from __future__ import annotations
 
@@ -160,7 +160,7 @@ BANTER_SCRIPTS: list[list[tuple[str, str]]] = [
     [
         ("main", "要下雨了"),
         ("buddy", "记得收衣服"),
-        ("main", "我是蟑螂"),
+        ("main", "我是小猫"),
         ("buddy", "也怕湿"),
     ],
     [
@@ -196,7 +196,7 @@ BANTER_SCRIPTS: list[list[tuple[str, str]]] = [
     ],
     [
         ("main", "被看见了!"),
-        ("buddy", "装死"),
+        ("buddy", "装睡"),
         ("main", "太晚了"),
         ("buddy", "那就对喷"),
     ],
@@ -210,19 +210,19 @@ BANTER_SCRIPTS: list[list[tuple[str, str]]] = [
         ("main", "你影子好丑"),
         ("buddy", "你本体一般"),
         ("main", "握手?"),
-        ("buddy", "触角碰一下"),
+        ("buddy", "碰鼻头一下"),
     ],
     [
         ("main", "今晚睡哪"),
-        ("buddy", "显示器后面"),
+        ("buddy", "键盘旁边"),
         ("main", "那位置是我的"),
         ("buddy", "拼桌吗"),
     ],
     [
-        ("main", "人类来了"),
+        ("main", "铲屎官来了"),
         ("buddy", "散!"),
-        ("main", "假装壁纸"),
-        ("buddy", "假装bug"),
+        ("main", "假装屏保"),
+        ("buddy", "假装鼠标垫"),
     ],
     # —— 互联网 / 游戏感 ——
     [
@@ -284,7 +284,7 @@ BANTER_SCRIPTS: list[list[tuple[str, str]]] = [
         ("main", "你赢了"),
         ("buddy", "赢什么"),
         ("main", "抬杠锦标赛"),
-        ("buddy", "金触角奖给我"),
+        ("buddy", "金鱼干奖给我"),
     ],
     [
         ("main", "消停会儿"),
@@ -302,7 +302,7 @@ BANTER_SCRIPTS: list[list[tuple[str, str]]] = [
 
 
 class AccountantBuddy:
-    """会计蟑螂同伴：画在主窗口右侧槽，自己排队说话。"""
+    """会计猫同伴：画在主窗口右侧槽，自己排队说话。"""
 
     def __init__(
         self,
@@ -395,7 +395,7 @@ class AccountantBuddy:
                 else:
                     self._feed_next_line()
 
-        # 对喷时现身跳舞；不用 happy 黄光，保持普通棕色
+        # 对喷时现身挥爪；平时完全隐去
         if self.bantering:
             self.roach.target_alpha = 255
             self.roach.target_scale = 1.05 + 0.03 * math.sin(pygame.time.get_ticks() * 0.01)
@@ -404,7 +404,11 @@ class AccountantBuddy:
             self.roach.target_scale = 0.95
 
         self.roach.set_facing(-1, 0)
-        self.roach.tick(False, 0.2, False, False, dancing=self.bantering)
+        self.roach.tick(
+            False, 0.2, False, False,
+            dancing=self.bantering,
+            anim="waving" if self.bantering else "idle",
+        )
 
     def draw(self, canvas: pygame.Surface, pad_x: int, roach_y: int, pet_w: int) -> None:
         if not self.active or self.roach.alpha < 1:

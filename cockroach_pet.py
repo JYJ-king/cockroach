@@ -1,4 +1,4 @@
-"""桌面蟑螂宠物 — macOS AppKit / Windows 透明置顶窗口 + pygame 离屏绘制。"""
+"""桌面小猫宠物 — macOS AppKit / Windows 透明置顶窗口 + pygame 离屏绘制。"""
 
 import math
 import os
@@ -81,7 +81,7 @@ if IS_MAC:
     except ImportError:
         OBJC_OK = False
 
-CAPTION = "Roach"
+CAPTION = "CatPet"
 FPS = 60
 
 
@@ -101,12 +101,23 @@ def app_dir() -> str:
 
 _BASE_DIR = resource_dir()
 IMAGE_PATH = os.path.join(_BASE_DIR, "cockroach.png")
+CAT_IMAGE_DIR = os.path.join(_BASE_DIR, "image")
+# 小猫 GIF：Idle / Waving / Running / Waiting / Review
+CAT_ANIM_FILES = {
+    "idle": "Idle.gif",
+    "waving": "Waving.gif",
+    "running": "Running.gif",
+    "waiting": "Waiting.gif",
+    "review": "Review.gif",
+}
+# Running 贴图默认头朝右；其它多为正面坐姿
+CAT_SIDE_ANIMS = frozenset({"running"})
 SKIN_TINTS = {
     "gold": (1.25, 1.05, 0.55),
     "ghost": (0.75, 0.95, 1.2),
 }
-SPRITE_W = 130
-PET_W, PET_H = 160, 180
+SPRITE_W = 140
+PET_W, PET_H = 168, 190
 BUBBLE_ZONE = 48
 WIN_W = PET_W + 70
 WIN_H = BUBBLE_ZONE + PET_H + 28
@@ -117,12 +128,9 @@ DUAL_WIN_W = WIN_W + BUDDY_SLOT_W
 
 WALK_SPEED = 1.8
 RUN_SPEED = 3.6
-BOB_AMPLITUDE = 3.5
-# 原图 cockroach.png：头（触角/前胸）在左上，翅尖（尾）在右下。
-# 加载时按此角转正：头朝上、尾朝下。pygame 正角为逆时针。
+BOB_AMPLITUDE = 2.0
+# 蟑螂静态贴图仅作 GIF 缺失时的回退资源
 SPRITE_ROTATE_DEG = -45
-# 转正后本地朝向（与 set_facing 同一套 atan2(vy,vx)，屏坐标 y 向下）：
-# 0=右, 90=下, ±180=左, -90=上。转正后头朝上 → -90。
 SPRITE_UPRIGHT_HEADING = -90.0
 LEG_COLOR = (138, 72, 32)
 LEG_COLOR_DARK = (100, 48, 20)
@@ -168,11 +176,11 @@ def period_of_day(hour: int | None = None) -> str:
 
 def greeting_by_period() -> str:
     return {
-        "morning": "早上好!",
-        "noon": "中午好!",
-        "afternoon": "下午好!",
-        "evening": "晚上好!",
-        "night": "夜深了哦~",
+        "morning": "早上好喵!",
+        "noon": "中午好喵!",
+        "afternoon": "下午好喵!",
+        "evening": "晚上好喵!",
+        "night": "夜深了,该踩奶了~",
     }[period_of_day()]
 
 
@@ -1000,14 +1008,14 @@ def worker_startup_tip() -> str:
         return PACKS.pick("worker_tips_friday", WORKER_TIPS_FRIDAY)
     period = period_of_day(now.hour)
     if period == "morning":
-        return random.choice(["打工人早上好", "今天也要稳住", "先喝口水开工", "对齐今天的自己"])
+        return random.choice(["打工人早上好", "今天也要稳住", "先喝口水开工", "先摸摸猫再开工"])
     if period == "noon":
-        return random.choice(["中午要记得吃饭哦", "午休十分钟也好", "闭环之前先干饭"])
+        return random.choice(["中午要记得吃饭哦", "午休十分钟也好", "闭环之前先干饭", "给我开个罐头?"])
     if period == "afternoon":
-        return random.choice(["下午继续干!", "摸鱼合法但护眼", "下午茶续命"])
+        return random.choice(["下午继续干!", "摸鱼合法但护眼", "下午茶续命", "激光笔呢?"])
     if period == "evening":
-        return random.choice(["别卷太晚", "下班路上注意安全", "收工别忘打卡"])
-    return random.choice(["夜班也辛苦了", "早点睡吧打工人", "线上稳住,人先睡"])
+        return random.choice(["别卷太晚", "下班路上注意安全", "收工别忘打卡", "该陪猫玩了"])
+    return random.choice(["夜班也辛苦了", "早点睡吧打工人", "线上稳住,人先睡", "深夜跑酷预告"])
 
 
 def worker_random_tip() -> str:
@@ -1212,13 +1220,13 @@ def format_sys_overview(s: dict | None = None) -> list[str]:
 
 
 def sys_alert_messages(s: dict | None = None) -> list[str]:
-    """资源告警文案（偏蟑螂吐槽）。"""
+    """资源告警文案（小猫吐槽）。"""
     s = s or sample_system(0.05)
     if not s:
         return []
     msgs = []
     if s["cpu"] >= 85:
-        msgs.append(f"CPU发烧{s['cpu']:.0f}%!少开点标签")
+        msgs.append(f"CPU发烧{s['cpu']:.0f}%!少开点标签喵")
     elif s["cpu"] >= 70:
         msgs.append(f"CPU有点忙{s['cpu']:.0f}%")
     if s["mem_pct"] >= 90:
@@ -1312,38 +1320,45 @@ class State(Enum):
     HIDE = auto()
     BELLY = auto()
     LASER = auto()
-    PEEK = auto()      # 探头张望
-    FORAGE = auto()    # 沿边觅食
+    PEEK = auto()      # 观鸟 / 伸脖子张望
+    FORAGE = auto()    # 沿边打猎 / 追毛线
     ZOOMIE = auto()    # 短暂疯跑
-    PANIC = auto()     # 受惊乱窜
+    PANIC = auto()     # 炸毛乱窜
     POSE = auto()      # 摆拍定格
     CALL = auto()      # 被召唤靠近
 
 
 class Bubble:
     PHRASES = [
-        "爬爬爬~", "嘎吱嘎吱", "嘿嘿", "我是小强!",
-        "找点吃的", "休息一会儿", "别开灯...", "缝里最安全",
+        "喵~", "呼噜呼噜", "嘿嘿", "我是小猫!",
+        "想吃小鱼干", "晒会儿太阳", "纸箱呢...", "窗台最舒服",
     ]
     CLICK_PHRASES = CLICK_BANTER_PHRASES
     POKE_PHRASES = POKE_BANTER_PHRASES
-    FEED_PHRASES = ["好吃!", "嚼嚼", "谢谢~", "还有吗?", "香!"]
+    FEED_PHRASES = ["好吃!", "嚼嚼", "谢谢喵~", "还有吗?", "香!", "小鱼干!", "罐头呢?"]
     CHAT_PHRASES = [
-        "今天键盘很香", "你又坐很久了", "我在角落看着你",
-        "别踩到我~", "听说蟑螂活很久", "黑暗真舒服",
-        "要不要喂一口?", "工作加油哦", "我去巡房了",
-        "鼠标别晃太凶", "屏幕好亮啊",
+        "今天键盘很暖", "你又坐很久了", "我在窗台看着你",
+        "别踩尾巴~", "听说猫有九条命", "阳光真舒服",
+        "要不要投喂?", "工作加油哦", "我去巡房了",
+        "激光笔呢?", "屏幕好亮啊",
         "对齐了吗打工人", "闭环了再摸鱼", "颗粒度再细点",
         "站会别超时", "需求又改了?", "保存了吗老板",
         "账对平了吗", "发票贴好没", "别反结账啊",
         "月结别熬夜", "报销我帮你盯",
+        "该摸摸猫了", "纸箱借我钻钻", "陪我玩毛线?",
     ]
-    FORAGE_PHRASES = ["找屑屑...", "这边有味道", "觅食中", "发现面包渣?"]
-    PANIC_PHRASES = ["喷雾!!", "要命!", "逃逃逃!", "关灯关灯!"]
-    POSE_PHRASES = ["茄子~", "拍好看点", "我帅吗?", "定格!"]
-    CALL_PHRASES = ["来了来了", "叫我?", "马上到", "干嘛呀"]
-    ZOOMIE_PHRASES = ["疯了!", "Zoom!", "冲刺!!", "停不下来"]
-    PEEK_PHRASES = ["谁在那?", "张望一下", "安全吗?", "探头~"]
+    FORAGE_PHRASES = ["打猎中...", "这边有味道", "发现毛线?", "虫子呢?", "扑!"]
+    PANIC_PHRASES = ["吸尘器!!", "黄瓜!!", "逃逃逃!", "炸毛!", "救命喵!"]
+    POSE_PHRASES = ["茄子~", "拍好看点", "我帅吗?", "定格!", "今日份猫片"]
+    CALL_PHRASES = ["来了来了", "叫我?", "马上到", "干嘛呀", "喵!"]
+    ZOOMIE_PHRASES = ["疯了!", "Zoom!", "半夜跑酷!", "停不下来", "电光猫!"]
+    PEEK_PHRASES = ["谁在那?", "张望一下", "安全吗?", "伸脖子~", "鸟呢?"]
+    KNEAD_PHRASES = ["踩奶中...", "软软的", "呼噜大作", "幸福!", "面团启动"]
+    LOAF_PHRASES = ["面团模式", "收起爪子", "烤猫面包", "能量填充中", "别吵"]
+    GROOM_PHRASES = ["理毛中...", "舔舔", "仪表很重要", "顺一顺", "光洁如新"]
+    POUNCE_PHRASES = ["扑击!", "锁定目标", "起飞!", "逮到你!", "暗杀猫"]
+    BOX_PHRASES = ["纸箱是家", "钻进去!", "外面消失了", "喵窝+1", "别拆快递"]
+    YARN_PHRASES = ["毛线球!", "缠住了", "再滚一下", "玩不够", "线头在哪"]
 
     def __init__(self, text: str | None = None, life: int = 140):
         self.text = text or random.choice(self.PHRASES)
@@ -1387,7 +1402,7 @@ class BubbleQueue:
 
 
 class FxParticle:
-    """短促视觉反馈：爱心 / 屑屑 / 星星，替代频繁说话。"""
+    """短促视觉反馈：爱心 / 碎屑 / 星星，替代频繁说话。"""
 
     def __init__(self, x, y, kind: str = "heart"):
         self.x, self.y = float(x), float(y)
@@ -1477,8 +1492,42 @@ def _apply_tint(surf: pygame.Surface, rgb_mul: tuple[float, float, float]) -> py
     return out
 
 
+def _pil_to_surface(img) -> pygame.Surface:
+    """PIL RGBA Image → pygame Surface（带 alpha）。"""
+    raw = img.convert("RGBA").tobytes()
+    return pygame.image.frombuffer(raw, img.size, "RGBA").copy()
+
+
+def load_gif_clip(path: str, width: int = SPRITE_W) -> tuple[list[pygame.Surface], list[int]]:
+    """加载 GIF 为缩放后的帧列表与每帧时长(ms)。"""
+    try:
+        from PIL import Image, ImageSequence
+    except ImportError as e:
+        raise RuntimeError("需要安装 pillow 才能播放小猫 GIF：pip install pillow") from e
+
+    if not pygame.get_init():
+        pygame.init()
+    if pygame.display.get_surface() is None:
+        pygame.display.set_mode((1, 1))
+
+    im = Image.open(path)
+    frames: list[pygame.Surface] = []
+    durations: list[int] = []
+    for frame in ImageSequence.Iterator(im):
+        rgba = frame.convert("RGBA")
+        tw = width
+        th = max(1, int(width * rgba.height / max(1, rgba.width)))
+        if rgba.size != (tw, th):
+            rgba = rgba.resize((tw, th), Image.Resampling.NEAREST)
+        frames.append(_pil_to_surface(rgba))
+        durations.append(max(40, int(frame.info.get("duration") or 120)))
+    if not frames:
+        raise RuntimeError(f"GIF 无帧: {path}")
+    return frames, durations
+
+
 def load_roach_sprite(width: int = SPRITE_W, skin: str = "default") -> pygame.Surface:
-    """加载贴图：重建透明 → 转正 → 皮肤着色 → 缩放。"""
+    """回退：加载静态贴图（无小猫 GIF 时）。"""
     if not pygame.get_init():
         pygame.init()
     if pygame.display.get_surface() is None:
@@ -1493,7 +1542,7 @@ def load_roach_sprite(width: int = SPRITE_W, skin: str = "default") -> pygame.Su
     print(f"✅ 已加载贴图: {path} (skin={skin})")
     mid_w = 420
     mid = pygame.transform.smoothscale(
-        raw.convert(),  # 先去掉坏 alpha 再缩放，避免透明黑渗进躯干
+        raw.convert(),
         (mid_w, int(mid_w * raw.get_height() / max(1, raw.get_width()))),
     )
     cut = _rebuild_alpha_from_black_bg(mid)
@@ -1512,18 +1561,44 @@ def load_roach_sprite(width: int = SPRITE_W, skin: str = "default") -> pygame.Su
     return sprite
 
 
-# ── 蟑螂渲染（照片贴图 + 轻量姿态动画）──────────────────
+def cat_anim_for_state(state: "State", moving: bool, hide_settled: bool = False) -> str:
+    """把脑状态映射到小猫 GIF 动作。移动中一律 Running。"""
+    if moving:
+        return "running"
+    if state in (
+        State.WALK, State.RUN, State.ZOOMIE, State.FOLLOW,
+        State.SCARED, State.PANIC, State.CALL, State.FORAGE,
+        State.LASER, State.DRAGGED,
+    ):
+        return "running"
+    if state == State.HIDE:
+        return "waiting" if hide_settled else "idle"
+    if state in (State.GREET, State.HAPPY, State.DANCE):
+        return "waving"
+    if state in (State.CURIOUS, State.PEEK, State.BELLY, State.SLEEP):
+        return "waiting"
+    if state in (State.POSE, State.SPIN):
+        return "review"
+    return "idle"
+
+
+# ── 小猫 GIF 渲染（Idle / Waving / Running / Waiting / Review）──
 
 class RoachRenderer:
-    """使用 cockroach.png；步态用轻微颠簸/摆动表现。"""
+    """主形象：image/*.gif 小猫动作；无资源时回退静态贴图。"""
 
     def __init__(self, skin: str = "default"):
         self.skin = skin
-        self.base = load_roach_sprite(SPRITE_W, skin=skin)
-        self.sw, self.sh = self.base.get_size()
+        self.clips: dict[str, tuple[list[pygame.Surface], list[int]]] = {}
+        self._raw_clips: dict[str, tuple[list[pygame.Surface], list[int]]] = {}
+        self.use_cat = False
+        self.anim = "idle"
+        self._fi = 0
+        self._accum = 0
+        self._last_ms = 0
+        self.anim_override: tuple[str, float] | None = None
         self.facing = 1
-        # 贴近 cockroach.png 原图：头朝左上，避免启动时竖直「立着」
-        self.heading = -135.0
+        self.heading = 0.0
         self.phase = 0.0
         self.bob = 0.0
         self.scale = 1.0
@@ -1538,56 +1613,158 @@ class RoachRenderer:
         self.gait = 0.0
         self.gait_amp = 0.0
         self.particles: list[FxParticle] = []
+        self.fade = True  # False=瞬间改透明度（主宠关闭淡化）
+        self.base = self._load_visuals(skin)
+        self.sw, self.sh = self.base.get_size()
+
+    def _load_visuals(self, skin: str) -> pygame.Surface:
+        loaded: dict[str, tuple[list[pygame.Surface], list[int]]] = {}
+        missing = []
+        for key, fname in CAT_ANIM_FILES.items():
+            path = os.path.join(CAT_IMAGE_DIR, fname)
+            if not os.path.isfile(path):
+                missing.append(fname)
+                continue
+            try:
+                frames, durs = load_gif_clip(path, SPRITE_W)
+                loaded[key] = (frames, durs)
+            except Exception as e:
+                print(f"⚠️ 加载 {fname} 失败: {e}")
+                missing.append(fname)
+        if len(loaded) >= 3 and "idle" in loaded:
+            self.use_cat = True
+            self._raw_clips = loaded
+            self.clips = self._tint_clips(loaded, skin)
+            print(f"✅ 小猫 GIF 已加载: {', '.join(sorted(self.clips))} ({SPRITE_W}px)")
+            return self.clips["idle"][0][0]
+        self.use_cat = False
+        if missing:
+            print(f"⚠️ 小猫 GIF 不完整（缺 {missing}），回退静态贴图")
+        return load_roach_sprite(SPRITE_W, skin=skin)
+
+    def _tint_clips(
+        self,
+        clips: dict[str, tuple[list[pygame.Surface], list[int]]],
+        skin: str,
+    ) -> dict[str, tuple[list[pygame.Surface], list[int]]]:
+        tint = SKIN_TINTS.get(skin)
+        if not tint:
+            return {k: (list(v[0]), list(v[1])) for k, v in clips.items()}
+        out = {}
+        for k, (frames, durs) in clips.items():
+            out[k] = ([_apply_tint(f, tint) for f in frames], list(durs))
+        return out
 
     def apply_skin(self, skin: str):
         self.skin = skin
-        self.base = load_roach_sprite(SPRITE_W, skin=skin)
+        if self.use_cat and self._raw_clips:
+            self.clips = self._tint_clips(self._raw_clips, skin)
+            self.base = self.clips.get(self.anim, self.clips["idle"])[0][0]
+        else:
+            self.base = load_roach_sprite(SPRITE_W, skin=skin)
         self.sw, self.sh = self.base.get_size()
 
+    def force_anim(self, name: str, duration_sec: float = 4.0):
+        """临时强制某动作（故事/对喷等）。"""
+        if name not in CAT_ANIM_FILES and name not in self.clips:
+            return
+        self.anim_override = (name, time.time() + max(0.5, duration_sec))
+        self.play(name)
+
+    def play(self, name: str):
+        if name not in self.clips:
+            name = "idle" if "idle" in self.clips else (next(iter(self.clips), "idle"))
+        if name != self.anim:
+            self.anim = name
+            self._fi = 0
+            self._accum = 0
+            if name in self.clips and self.clips[name][0]:
+                self.base = self.clips[name][0][0]
+                self.sw, self.sh = self.base.get_size()
+
     def set_facing(self, vx: float, vy: float = 0.0):
-        if abs(vx) + abs(vy) > 0.08:
+        # 以水平速度决定左右朝向；Running 贴图默认朝右
+        if abs(vx) > 0.08:
+            self.facing = 1 if vx > 0 else -1
             self.heading = math.degrees(math.atan2(vy, vx))
-            self.facing = 1 if vx >= 0 else -1
+        elif abs(vy) > 0.08:
+            # 纯上下移动时保持当前左右朝向，只更新 heading
+            self.heading = math.degrees(math.atan2(vy, vx if abs(vx) > 1e-6 else 0.0))
 
     def burst(self, cx: float, cy: float, kind: str, n: int = 5):
         for _ in range(n):
             self.particles.append(FxParticle(cx, cy, kind))
 
+    def _advance_frames(self):
+        if not self.use_cat or self.anim not in self.clips:
+            return
+        frames, durs = self.clips[self.anim]
+        if not frames:
+            return
+        now = pygame.time.get_ticks()
+        if self._last_ms <= 0:
+            self._last_ms = now
+            return
+        self._accum += max(0, now - self._last_ms)
+        self._last_ms = now
+        # 防卡顿一次跳太多帧
+        guard = 0
+        while self._accum >= durs[self._fi] and guard < 12:
+            self._accum -= durs[self._fi]
+            self._fi = (self._fi + 1) % len(frames)
+            guard += 1
+        self.base = frames[self._fi]
+        self.sw, self.sh = self.base.get_size()
+
     def tick(self, moving: bool, speed: float, sleeping: bool, happy: bool,
-             dancing: bool = False, spinning: bool = False):
+             dancing: bool = False, spinning: bool = False, anim: str | None = None):
         self.happy = happy
+        # 位移中一律 Running，避免 waiting/waving 被强制时像倒着滑
+        if moving and self.use_cat:
+            self.play("running")
+        else:
+            if self.anim_override:
+                name, until = self.anim_override
+                if time.time() < until:
+                    anim = name
+                else:
+                    self.anim_override = None
+            if anim:
+                self.play(anim)
+
         target_amp = 0.0
         if sleeping:
             self.phase += 0.04
-            self.bob = math.sin(self.phase) * 0.8
+            self.bob = math.sin(self.phase) * 0.6
             self.tilt = 0.0
             self.gait += 0.02
         elif dancing:
-            self.phase += 0.35
-            self.bob = math.sin(self.phase * 3) * 5
-            self.tilt = math.sin(self.phase * 2) * 8
-            self.spin += math.sin(self.phase) * 4
-            self.gait += 0.5
-            target_amp = 1.0
+            self.phase += 0.28
+            self.bob = math.sin(self.phase * 2.5) * 3
+            self.tilt = math.sin(self.phase * 2) * 4
+            self.spin += math.sin(self.phase) * 2
+            self.gait += 0.4
+            target_amp = 0.6
         elif spinning:
             self.phase += 0.2
             self.bob = 1
-            self.spin += self.spin_vel or 18
+            self.spin += self.spin_vel or 14
             self.spin_vel *= 0.985
-            self.gait += 0.55
-            target_amp = 0.7
+            self.gait += 0.45
+            target_amp = 0.5
         elif moving:
-            self.phase += 0.28 + speed * 0.12
-            self.gait += 0.25 + speed * 0.16
-            target_amp = min(1.0, 0.5 + speed * 0.2)
-            self.bob = math.sin(self.gait * 2) * BOB_AMPLITUDE * target_amp
-            self.tilt = math.sin(self.gait) * 5.0 * target_amp
+            self.phase += 0.22 + speed * 0.1
+            self.gait += 0.2 + speed * 0.12
+            target_amp = min(1.0, 0.4 + speed * 0.15)
+            # 小猫 GIF 自带动画，颠簸减弱
+            self.bob = math.sin(self.gait * 2) * BOB_AMPLITUDE * 0.35 * target_amp
+            self.tilt = 0.0
         else:
             self.phase += 0.05
             self.gait += 0.05
-            target_amp = 0.1
-            self.bob = math.sin(self.phase) * 0.4
-            self.tilt = math.sin(self.phase * 0.5) * 0.5
+            target_amp = 0.05
+            self.bob = math.sin(self.phase) * 0.3
+            self.tilt = 0.0
             if abs(self.spin_vel) > 0.3:
                 self.spin += self.spin_vel
                 self.spin_vel *= 0.92
@@ -1596,35 +1773,36 @@ class RoachRenderer:
 
         self.gait_amp += (target_amp - self.gait_amp) * 0.2
         self.scale += (self.target_scale - self.scale) * 0.12
-        self.alpha += (self.target_alpha - self.alpha) * 0.15
+        # 主宠不淡化；同伴可通过 fade=False 瞬间显隐
+        if getattr(self, "fade", True):
+            self.alpha += (self.target_alpha - self.alpha) * 0.15
+        else:
+            self.alpha = float(self.target_alpha)
         self.particles = [p for p in self.particles if p.tick()]
+        self._advance_frames()
 
     def _compose_local(self, s: float, moving: bool) -> pygame.Surface:
-        """贴图本体；走动时略微压扁模拟步态。"""
         bw = max(1, int(self.sw * s))
         bh = max(1, int(self.sh * s))
-        # 步态：轻微上下压扁 / 左右晃
-        squash = 1.0 - 0.04 * self.gait_amp * abs(math.sin(self.gait * 2))
-        stretch = 1.0 + 0.03 * self.gait_amp * abs(math.sin(self.gait * 2))
-        dw = max(1, int(bw * stretch))
-        dh = max(1, int(bh * squash))
-
         img = self.base
         if self.belly:
             img = pygame.transform.flip(img, False, True)
-        body = pygame.transform.smoothscale(img, (dw, dh))
+        # Running 朝右；朝左时水平翻转
+        if self.use_cat and self.anim in CAT_SIDE_ANIMS and self.facing < 0:
+            img = pygame.transform.flip(img, True, False)
+        body = pygame.transform.scale(img, (bw, bh))
         if self.happy:
             tinted = body.copy()
             glow = pygame.Surface(tinted.get_size(), pygame.SRCALPHA)
-            glow.fill((255, 190, 60, 35))
+            glow.fill((255, 200, 120, 28))
             tinted.blit(glow, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
             body = tinted
 
-        pad = 8
-        local = pygame.Surface((dw + pad * 2, dh + pad * 2), pygame.SRCALPHA)
+        pad = 6
+        local = pygame.Surface((bw + pad * 2, bh + pad * 2), pygame.SRCALPHA)
         local.blit(body, (pad, pad))
-        if abs(self.tilt) > 0.4:
-            local = pygame.transform.rotate(local, self.tilt * 0.35)
+        if abs(self.tilt) > 0.5:
+            local = pygame.transform.rotate(local, self.tilt * 0.25)
         return local
 
     def draw(
@@ -1642,28 +1820,31 @@ class RoachRenderer:
 
         if self.alpha >= 1:
             local = self._compose_local(s, moving)
-            # 贴图本地头朝上。pygame.rotate 正角=逆时针，故取反：
-            # turn = -(目标朝向 - 本地朝上) ，例如朝右 heading=0 → turn=-90（顺时针）
-            turn = -(self.heading - SPRITE_UPRIGHT_HEADING) + self.spin
-            if abs(turn) > 0.05:
-                local = pygame.transform.rotate(local, turn)
+            if self.use_cat:
+                # 小猫不绕头尾旋转；仅 SPIN 时轻微自转
+                if abs(self.spin) > 0.5:
+                    local = pygame.transform.rotate(local, self.spin)
+            else:
+                turn = -(self.heading - SPRITE_UPRIGHT_HEADING) + self.spin
+                if abs(turn) > 0.05:
+                    local = pygame.transform.rotate(local, turn)
 
             if self.alpha < 250:
                 local = local.copy()
                 local.set_alpha(max(min_alpha, int(self.alpha)))
 
             rect = local.get_rect(center=(int(cx), int(cy)))
-            sh_a = max(0, min(50, int(50 * self.alpha / 255)))
+            sh_a = max(0, min(40, int(40 * self.alpha / 255)))
             if sh_a > 0:
-                sh_w = int(min(rect.width, rect.height) * 0.7)
+                sh_w = int(min(rect.width, rect.height) * 0.55)
                 shad = pygame.Surface((max(8, sh_w), 8), pygame.SRCALPHA)
                 pygame.draw.ellipse(shad, (0, 0, 0, sh_a), shad.get_rect())
                 surf.blit(shad, (rect.centerx - shad.get_width() // 2, rect.bottom - 4))
             surf.blit(local, rect)
 
             if sleeping:
-                veil = pygame.Surface((rect.width, max(4, rect.height // 4)), pygame.SRCALPHA)
-                veil.fill((80, 80, 120, 70))
+                veil = pygame.Surface((rect.width, max(4, rect.height // 5)), pygame.SRCALPHA)
+                veil.fill((80, 80, 120, 55))
                 surf.blit(veil, (rect.left, rect.top + 4))
 
         for p in self.particles:
@@ -1677,7 +1858,6 @@ class RoachRenderer:
             else:
                 col = (200, 200, 200, a)
             pygame.draw.circle(surf, col, (int(p.x), int(p.y)), p.size)
-
 
 
 # ── AI ────────────────────────────────────────────────────
@@ -1719,7 +1899,7 @@ class PetBrain:
             self.target_y = self._rand_coord(m, self.sh - self.ph)
 
     def _pick_hide_spot(self, avoid_current: bool = False):
-        """选屏幕角落/边缘缝隙作为藏身处。"""
+        """选屏幕角落/窗台作为趴窝点。"""
         spots = [
             (16, 28),
             (self.sw - self.pw - 16, 28),
@@ -1741,17 +1921,16 @@ class PetBrain:
         self.state_timer = dur
 
     def go_hide(self, scramble: bool = False):
-        """回到躲藏：平时默认态。scramble=True 时换角落逃窜。"""
+        """回窝趴着：平时默认态。scramble=True 时换角落跑酷。"""
         self.follow = False
         self._pick_hide_spot(avoid_current=scramble)
         self._set(State.HIDE, 99999)
         if scramble:
-            # 先受惊冲刺一小段，再钻进目标角落
             self.vx = random.choice([-1, 1]) * RUN_SPEED * 0.9
             self.vy = random.uniform(-1.2, 1.2)
 
     def _rest(self):
-        """互动结束后回到躲藏（跟随模式除外）。"""
+        """互动结束后回窝（跟随模式除外）。"""
         if self.follow:
             self._set(State.FOLLOW, 9999)
         else:
@@ -1909,25 +2088,18 @@ class PetBrain:
                 dy = self.target_y - py
                 d = math.hypot(dx, dy)
                 if d < 8:
-                    self.vx *= 0.7
-                    self.vy *= 0.7
-                    if abs(self.vx) + abs(self.vy) < 0.05:
-                        self.vx = self.vy = 0
-                    # 藏好了就一直躲着，只偶尔微动
+                    self.vx = self.vy = 0
+                    # 趴好了就在窝里静止，不做微位移（避免 Idle/Waiting 时自己平移）
                     if self.state_timer < 120:
                         self.state_timer = random.randint(800, 2400)
-                    if random.random() < 0.0015:
-                        self.vx = random.uniform(-0.35, 0.35)
-                        self.vy = random.uniform(-0.25, 0.25)
                 else:
                     sp = WALK_SPEED * 1.55
                     self.vx, self.vy = dx / d * sp, dy / d * sp
-            # 不自动现身；只有互动才会离开 HIDE
+            # 不自动乱跑；只有互动才会离开回窝态
 
         elif self.state == State.PEEK:
-            # 从藏身处探头张望，轻微左右晃
-            self.vx = math.sin(self.state_timer * 0.15) * 0.35
-            self.vy = 0
+            # 观鸟只播 Waiting，不产生位移（避免被当成 Running）
+            self.vx = self.vy = 0
             if self.state_timer <= 0:
                 self._rest()
 
@@ -2056,8 +2228,8 @@ class PetBrain:
             self.vx *= 0.85
             self.vy *= 0.85
             if self.state_timer <= 0:
-                # 闲着也会钻回缝里，极少主动乱逛
-                if random.random() < 0.12:
+                # 默认回窝趴着，极少主动乱逛
+                if random.random() < 0.04:
                     self._set(State.WALK, random.randint(60, 120))
                     self._pick_target()
                 else:
@@ -2175,6 +2347,9 @@ class RoachPet:
         if skin not in unlocked and skin not in ("default", "gold", "ghost"):
             skin = "default"
         self.roach = RoachRenderer(skin=skin)
+        self.roach.fade = False  # 小猫始终清晰，不做半透明淡化
+        self.roach.target_alpha = 255
+        self.roach.alpha = 255
         self.canvas = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
         self.font = load_cjk_font(14)
         self.font_sm = load_cjk_font(12)
@@ -2182,8 +2357,6 @@ class RoachPet:
         self.x = float(self.brain.target_x or (sw - WIN_W) // 2)
         self.y = float(self.brain.target_y or (sh - WIN_H - 50))
         self.prev_x, self.prev_y = self.x, self.y
-        self.roach.target_alpha = 70
-        self.roach.alpha = 70
         self.dragging = False
         self.drag_start = (0.0, 0.0)
         self.click_time = 0
@@ -2220,6 +2393,11 @@ class RoachPet:
         self._last_sys_alert = ""
         self._near_mouse = False
         self._hide_scramble_at = 0.0
+        # 鼠标久闲寻访：默认 30 分钟不动就跑去找指针
+        self._last_mouse_pos: tuple[float, float] | None = None
+        self._mouse_still_since = time.time()
+        self._next_mouse_seek = 0.0
+        self._seek_act: str | None = None
         self._fx_anchor = (PAD_X + PET_W / 2, ROACH_Y + PET_H / 2)
         self._running = True
         self.screen = None
@@ -2248,12 +2426,13 @@ class RoachPet:
         self.tick()
 
     def _init_buddy(self):
-        """创建会计蟑螂同伴（默认开启，可设置关闭）。"""
+        """创建会计猫同伴（默认开启，可设置关闭）。"""
         if not self.settings.get("accountant_buddy", True):
             self.buddy = None
             self._sync_layout()
             return
         buddy_roach = RoachRenderer(skin="default")
+        buddy_roach.fade = False
         self.buddy = AccountantBuddy(
             buddy_roach,
             self.font,
@@ -2319,7 +2498,7 @@ class RoachPet:
         self._win_apply_pos()
 
     def do_banter(self):
-        """手动触发一次打工蟑螂 vs 会计蟑螂对喷。"""
+        """手动触发一次主宠 vs 会计猫对喷。"""
         if self._ai_available() and not self._ai_skip_busy():
             def worker():
                 try:
@@ -2344,14 +2523,14 @@ class RoachPet:
                 self.buddy.roach.target_alpha = 0
                 self.buddy.roach.alpha = 0
                 self._sync_layout()
-            self.say("会计蟑螂待命", urgent=True)
+            self.say("会计猫待命", urgent=True)
         else:
             if self.buddy:
                 self.buddy.active = False
                 self.buddy.bubbles.clear()
                 self.buddy._script.clear()
             self._sync_layout()
-            self.say("会计去对账了", urgent=True)
+            self.say("会计去对账了喵", urgent=True)
 
     def _check_buddy_banter(self):
         if not self.settings.get("accountant_buddy", True) or self.buddy is None or not self.buddy.active:
@@ -2529,6 +2708,8 @@ class RoachPet:
             self.toggle_rest_reminder()
         elif cmd == "toggle_showcase":
             self.toggle_idle_showcase()
+        elif cmd == "toggle_mouse_seek":
+            self.toggle_mouse_seek()
         elif cmd == "toggle_ai":
             self.toggle_ai()
         elif cmd == "cycle_ai_provider":
@@ -2600,7 +2781,7 @@ class RoachPet:
         if is_workday(now):
             bits.append("工作日")
         if self.brain.state == State.HIDE:
-            bits.append("躲着")
+            bits.append("趴窝")
         return " ".join(bits)
 
     def _ai_available(self) -> bool:
@@ -2647,6 +2828,7 @@ class RoachPet:
         self.buddy.active = True
         self._sync_layout()
         self.roach.target_alpha = 255
+        self.roach.force_anim("waving", 12.0)
         if self.brain.state == State.HIDE:
             self.brain._set(State.GREET, 160)
         self.buddy.start_banter(script)
@@ -2661,9 +2843,10 @@ class RoachPet:
             self.bubbles.push(tip, life=160)
             if is_workday():
                 self.bubbles.push(worker_startup_tip(), life=140)
-        # 探头打个招呼，随后钻回角落
+        # 挥爪打个招呼，随后回窗台趴窝
         self.brain._set(State.GREET, 100)
         self.roach.target_alpha = 255
+        self.roach.force_anim("waving", 3.0)
 
     def say(self, text: str, life: int = 160, urgent: bool = False):
         # 关气泡时仍允许 urgent（热键/菜单反馈）
@@ -2702,7 +2885,7 @@ class RoachPet:
         e, h = int(self.brain.energy), int(self.brain.hunger)
         aff = int(self.brain.affection)
         mood = "饿" if h > 70 else ("困" if e < 30 else "精神")
-        hide = "躲着" if self.brain.state == State.HIDE else "在外面"
+        hide = "趴窝" if self.brain.state == State.HIDE else "在外面"
         self.say(f"{mood} {hide} 亲密度{aff}", urgent=True)
 
     def say_sys_cpu(self):
@@ -2776,6 +2959,7 @@ class RoachPet:
         """假装月结。"""
         self.roach.target_alpha = 255
         self.brain._set(State.POSE, 130)
+        self.roach.force_anim("review", 5.0)
         self.bubbles.clear()
         self.bubbles.push_many(
             [
@@ -2870,9 +3054,9 @@ class RoachPet:
         self.fx("star", 4)
 
     def do_fish(self):
-        """合法摸鱼。"""
-        self.roach.target_alpha = 200
+        """合法摸鱼（猫版：蹲窝偷看）。"""
         self.brain.react_peek()
+        self.roach.force_anim("waiting", 3.0)
         self.say(PACKS.pick("worker_fish", WORKER_FISH), urgent=True, life=150)
         self.fx("crumb", 3)
 
@@ -2887,6 +3071,7 @@ class RoachPet:
     def do_chat(self):
         self.brain._set(State.GREET, 80)
         self.roach.target_alpha = 255
+        self.roach.force_anim("waving", 3.5)
         self.fx("star", 3)
         ctx = self._ai_context()
 
@@ -2920,6 +3105,7 @@ class RoachPet:
         self.roach.target_alpha = 255
         self.roach.belly = False
         self.brain.react_pose()
+        self.roach.force_anim("review", 8.0)
         self.fx("star", 6)
         self._rest_active = False
 
@@ -2955,6 +3141,7 @@ class RoachPet:
         line = pick_rest_line()
         self.bubbles.push_many([line, "起来活动一下", "点我可关掉提示"], life=140)
         self.brain.react_dance()
+        self.roach.force_anim("waving", 6.0)
         self.fx("star", 8)
 
     def toggle_rest_reminder(self):
@@ -2980,6 +3167,17 @@ class RoachPet:
             self.say("周期表演开", urgent=True)
         else:
             self.say("周期表演关", urgent=True)
+
+    def toggle_mouse_seek(self):
+        on = not self.settings.get("mouse_seek", True)
+        self.settings["mouse_seek"] = on
+        save_settings(self.app_root, self.settings)
+        if on:
+            self._mouse_still_since = time.time()
+            self.say("寻访开(鼠标久闲找你)", urgent=True, life=140)
+        else:
+            self._seek_act = None
+            self.say("寻访关", urgent=True)
 
     def toggle_ai(self):
         ai = self.settings.setdefault("ai", {})
@@ -3017,20 +3215,16 @@ class RoachPet:
     def say_help(self):
         self.bubbles.clear()
         self.bubbles.push_many([
-            "点头摸·点尾吓·双击跑",
-            "/总览 [CPU ]内存 \\磁盘 '网络",
-            "G打工 J黑话 5财务话 ;财务提醒",
-            "9税务 0发薪 6月结 7审计 8报销",
-            "1站会 2复盘 3摸鱼 4反PUA",
-            "Q探头 E觅食 Z疯跑 H帮助",
-            "T故事大会 D日期 W天气 S状态",
-            "Ctrl+Alt+R召唤 P穿透 B对喷 T故事 A开AI",
-            ",对喷 .开关会计蟑螂",
-            "菜单:故事/休息/AI开关与厂商",
+            "上头摸·下身逗·双击跑·连摸踩奶",
+            "N纸箱 C回窝 E打猎 Q观鸟 Z跑酷",
+            "U露肚皮 L激光 V炸毛 X扑击",
+            "K召唤 M跟随 T故事 I闲聊 H帮助",
+            "G打工 J黑话 ,对喷 .开关会计猫",
+            "Ctrl+Alt+R召唤 P穿透 A开AI",
         ], life=150)
 
     def _check_sys_alerts(self):
-        """周期性检查资源，过高时缝里嘀咕一声。"""
+        """周期性检查资源，过高时嘀咕一声。"""
         now = time.time()
         if now < self._next_sys_check:
             return
@@ -3147,7 +3341,7 @@ class RoachPet:
             return
         if self.bubbles.current or self.bubbles._q:
             return
-        # 躲着时几乎不主动出来，顶多缝里嘀咕一声
+        # 趴窝时几乎不主动出来，顶多嘀咕一声
         if self.brain.state == State.HIDE:
             if random.random() < 0.4 and is_workday():
                 use_fin = self.settings.get("finance_reminders", True) and random.random() < 0.55
@@ -3170,7 +3364,7 @@ class RoachPet:
             self.say(worker_random_tip(), life=150)
             self.fx("star", 3)
         else:
-            self.maybe_say(random.choice(["喝口水?", "活动下~", "发票呢?"]), chance=0.4)
+            self.maybe_say(random.choice(["喝口水?", "摸摸猫?", "小鱼干?"]), chance=0.4)
             self.brain.go_hide()
 
     def _check_idle_showcase(self):
@@ -3211,11 +3405,15 @@ class RoachPet:
                 return
             self.roach.target_alpha = 255
             act = random.random()
-            if act < 0.28:
+            if act < 0.22:
                 self.brain.react_peek()
-            elif act < 0.55:
+            elif act < 0.42:
+                self.do_groom()
+                self.say(text, life=120)
+                return
+            elif act < 0.62:
                 self.brain.react_pose()
-            elif act < 0.78:
+            elif act < 0.80:
                 self.brain.react_dance()
                 self.fx("star", 4)
             else:
@@ -3242,11 +3440,13 @@ class RoachPet:
                     self.fx("star", 2)
                 else:
                     act = random.random()
-                    if act < 0.28:
+                    if act < 0.22:
                         self.brain.react_peek()
-                    elif act < 0.55:
+                    elif act < 0.42:
+                        self.do_groom()
+                    elif act < 0.62:
                         self.brain.react_pose()
-                    elif act < 0.78:
+                    elif act < 0.80:
                         self.brain.react_dance()
                         self.fx("star", 4)
                     else:
@@ -3318,11 +3518,11 @@ class RoachPet:
             if self.brain.state == State.HIDE and d < 90:
                 now = time.time()
                 if now - self._hide_scramble_at > 4.0:
-                    # 被发现了：换个角落继续躲
+                    # 被发现了：换个窝继续趴
                     self._hide_scramble_at = now
                     self.brain.go_hide(scramble=True)
                     self.fx("dust", 3)
-                    self.maybe_say("溜了!", chance=0.12)
+                    self.maybe_say(random.choice(["换窝!", "别吓我!", "喵?!"]), chance=0.2)
             elif self.brain.state == State.IDLE:
                 self.brain._set(State.CURIOUS, 90)
                 self.roach.target_scale = 1.05
@@ -3330,22 +3530,152 @@ class RoachPet:
             self.roach.target_scale = 1.0
         self._near_mouse = near
 
+    def _track_mouse_idle(self, mx: float, my: float):
+        """更新鼠标静止计时；有明显移动则重置。"""
+        now = time.time()
+        if self._last_mouse_pos is None:
+            self._last_mouse_pos = (mx, my)
+            self._mouse_still_since = now
+            return
+        lx, ly = self._last_mouse_pos
+        if math.hypot(mx - lx, my - ly) > 10:
+            self._last_mouse_pos = (mx, my)
+            self._mouse_still_since = now
+            # 用户动了鼠标：取消未完成的寻访动作标记（若还在跑可继续，但不重复触发）
+            return
+        self._last_mouse_pos = (mx, my)
+
+    def _check_mouse_seek(self, mx: float, my: float):
+        """鼠标长时间不动时，跑去找指针并随机互动。"""
+        self._track_mouse_idle(mx, my)
+        if not self.settings.get("mouse_seek", True):
+            return
+        now = time.time()
+        idle_need = float(self.settings.get("mouse_idle_sec") or 1800)
+        if now - self._mouse_still_since < max(60.0, idle_need):
+            return
+        if now < self._next_mouse_seek:
+            return
+        if self.dragging or self.right_dragging or self._rest_active:
+            return
+        if self._seek_act:
+            return
+        if self.buddy and self.buddy.bantering:
+            return
+        if self.brain.state in (State.SLEEP, State.DRAGGED, State.LASER, State.PANIC, State.FOLLOW):
+            return
+        if self.bubbles.current or self.bubbles._q:
+            # 等气泡空一点再来，稍后再试
+            self._next_mouse_seek = now + 45
+            return
+
+        cooldown = float(self.settings.get("mouse_seek_cooldown_sec") or 900)
+        self._next_mouse_seek = now + max(120.0, cooldown)
+        self._mouse_still_since = now
+        self.do_mouse_seek()
+
+    def do_mouse_seek(self):
+        """跑向鼠标，抵达后做随机互动。"""
+        acts = (
+            "wave", "knead", "dance", "groom", "chat",
+            "laser", "yarn", "peek", "pose", "stretch",
+        )
+        self._seek_act = random.choice(acts)
+        self.roach.target_alpha = 255
+        self.roach.belly = False
+        self.roach.anim_override = None
+        self.brain.react_call()
+        # 跨屏跑过去可能较久，加长召唤时限
+        self.brain.state_timer = max(int(self.brain.state_timer), 520)
+        openers = [
+            "找你玩!", "还在吗?", "摸鱼太久了!", "喵?",
+            "起来动动!", "戳一下你~", "我来巡视了",
+            "指针在这!", "陪我玩会儿", "久坐警告喵",
+        ]
+        self.say(random.choice(openers), urgent=True, life=130)
+        self.fx("star", 5)
+
+    def _maybe_finish_mouse_seek(self, mx: float, my: float):
+        """抵达指针附近后执行寻访互动。"""
+        if not self._seek_act:
+            return
+        cx = self.x + WIN_W / 2
+        cy = self.y + WIN_H / 2
+        d = math.hypot(mx - cx, my - cy)
+        # 到了，或召唤态已切到开心（CALL 抵达逻辑）
+        arrived = d < 90 or (
+            self.brain.state == State.HAPPY and self._seek_act is not None
+        )
+        if not arrived and self.brain.state == State.CALL:
+            return
+        if not arrived:
+            # 召唤被打断则放弃本次互动
+            if self.brain.state not in (State.CALL, State.HAPPY, State.GREET, State.RUN):
+                self._seek_act = None
+            return
+
+        act = self._seek_act
+        self._seek_act = None
+        self._perform_seek_act(act)
+
+    def _perform_seek_act(self, act: str):
+        """寻访抵达后的随机互动包。"""
+        if act == "wave":
+            self.brain._set(State.GREET, 100)
+            self.roach.force_anim("waving", 4.0)
+            self.fx("heart", 6)
+            self.say(random.choice(["嗨!", "看到你了", "挥爪!", "摸摸?"]), urgent=True, life=120)
+        elif act == "knead":
+            self.do_knead()
+        elif act == "dance":
+            self.do_dance()
+            self.say(random.choice(["蹦迪醒神!", "甩甩懒腰", "起来嗨!"]), urgent=True, life=110)
+        elif act == "groom":
+            self.do_groom()
+        elif act == "chat":
+            self.do_chat()
+        elif act == "laser":
+            self.do_laser()
+            self.say("激光时间!", urgent=True, life=100)
+        elif act == "yarn":
+            self.do_yarn()
+        elif act == "peek":
+            self.do_peek()
+            self.say(random.choice(["在干嘛?", "发呆呢?", "看你屏幕~"]), urgent=True, life=110)
+        elif act == "pose":
+            self.do_pose()
+        else:  # stretch
+            self.brain.react_dance()
+            self.roach.force_anim("waving", 5.0)
+            self.fx("star", 8)
+            self.bubbles.clear()
+            self.bubbles.push_many(
+                [
+                    random.choice(["久坐提醒!", "起来走走", "活动一下颈椎"]),
+                    "我陪你伸个懒腰",
+                    "喝口水也好",
+                ],
+                life=130,
+            )
+
     def do_feed(self, feast: bool = False):
         self.brain.react_feed(feast=feast)
         self.roach.target_scale = 1.18 if feast else 1.12
         self.roach.belly = False
+        self.roach.force_anim("waving", 2.5)
         self.fx("crumb", 12 if feast else 8)
         self._note_progress(feed_count=1)
         if feast:
-            self.say(random.choice(["大餐!", "撑住了", "太幸福!"]), urgent=True)
+            self.say(random.choice(["大餐!", "撑住了", "罐头幸福!", "小鱼干雨!"]), urgent=True)
         else:
             self.maybe_say(random.choice(Bubble.FEED_PHRASES), chance=0.35)
 
     def do_dance(self):
         self.brain.react_dance()
         self.roach.belly = False
+        self.roach.force_anim("waving", 4.0)
         self.fx("star", 8)
-        self.maybe_say("蹦迪!", chance=0.25)
+        self.maybe_say(random.choice(["蹦迪喵!", "甩尾巴!", "猫步!"]), chance=0.35)
 
     def do_home(self):
         sw, sh = get_desktop_size()
@@ -3354,88 +3684,147 @@ class RoachPet:
         self.brain._set(State.RUN, 180)
         self.brain.pet_streak = 0
         self.roach.belly = False
-        self.roach.target_alpha = 255
 
     def do_hide(self):
-        self.brain.react_hide()
-        self.roach.target_alpha = 70
+        """回窝趴下（面团猫）。"""
+        self.do_loaf()
+
+    def do_loaf(self):
+        """面团模式：回角落趴窝；途中用 Running，到了再 Waiting。"""
         self.roach.belly = False
-        self.fx("dust", 4)
-        self.maybe_say("躲起来~", chance=0.2)
+        # 已在窝里：原地面团，不重新选点乱跑
+        if self.brain.state == State.HIDE:
+            near = (
+                self.brain.target_x is not None
+                and math.hypot(self.x - self.brain.target_x, self.y - (self.brain.target_y or self.y)) < 24
+            )
+            if near:
+                self.brain.vx = self.brain.vy = 0
+                self.roach.force_anim("waiting", 5.0)
+                self.fx("star", 2)
+                self.maybe_say(random.choice(Bubble.LOAF_PHRASES), chance=0.4)
+                return
+        self.brain.go_hide(scramble=False)
+        # 到站后再面团；移动中由 tick 强制 Running
+        self.roach.force_anim("waiting", 6.0)
+        self.fx("star", 2)
+        self.maybe_say(random.choice(Bubble.LOAF_PHRASES), chance=0.4)
 
     def do_belly(self):
         self.brain.react_belly()
         self.roach.belly = True
         self.roach.spin = 180
+        self.roach.force_anim("waiting", 3.0)
         self.fx("star", 5)
-        self.maybe_say("翻了!", chance=0.3)
+        self.maybe_say(random.choice(["翻肚皮!", "信任你哦", "但别乱摸!", "暖呼呼"]), chance=0.45)
 
     def do_laser(self):
         self.brain.react_laser()
         self.roach.belly = False
-        self.roach.target_alpha = 255
+        # 追光：移动中自然 Running，无需锁死动作
+        self.roach.anim_override = None
         self.fx("star", 3)
-        self.maybe_say("追光点!", chance=0.25)
+        self.maybe_say(random.choice(["追光点!", "红点在哪!", "魂都被吸走了"]), chance=0.4)
 
     def do_follow_toggle(self):
         on = self.brain.react_follow_toggle()
-        self.roach.target_alpha = 255
         self.roach.belly = False
         self.fx("heart" if on else "dust", 4)
-        self.maybe_say("跟着你" if on else "不跟了", chance=0.35)
+        self.maybe_say("跟着铲屎官" if on else "自己玩去", chance=0.4)
 
     def do_peek(self):
+        """观鸟 / 张望。"""
         self.brain.react_peek()
-        self.roach.target_alpha = 200
         self.roach.belly = False
+        self.roach.force_anim("waiting", 3.5)
         self.fx("star", 2)
-        self.maybe_say(random.choice(Bubble.PEEK_PHRASES), chance=0.4)
+        self.maybe_say(random.choice(Bubble.PEEK_PHRASES), chance=0.45)
 
     def do_forage(self):
+        """打猎 / 玩毛线。"""
+        if random.random() < 0.45:
+            self.do_yarn()
+            return
         self.brain.react_forage()
-        self.roach.target_alpha = 255
         self.roach.belly = False
+        self.roach.anim_override = None
         self.fx("crumb", 4)
-        self.maybe_say(random.choice(Bubble.FORAGE_PHRASES), chance=0.45)
+        self.maybe_say(random.choice(Bubble.FORAGE_PHRASES), chance=0.5)
+
+    def do_yarn(self):
+        """追毛线球。"""
+        self.brain.react_forage()
+        self.roach.belly = False
+        self.roach.anim_override = None
+        self.fx("star", 5)
+        self.say(random.choice(Bubble.YARN_PHRASES), urgent=True, life=110)
 
     def do_zoomie(self):
         self.brain.react_zoomie()
-        self.roach.target_alpha = 255
         self.roach.belly = False
+        self.roach.anim_override = None
         self.fx("dust", 6)
-        self.maybe_say(random.choice(Bubble.ZOOMIE_PHRASES), chance=0.4)
+        self.maybe_say(random.choice(Bubble.ZOOMIE_PHRASES), chance=0.45)
 
     def do_panic(self):
         self.brain.react_panic()
-        self.roach.target_alpha = 255
         self.roach.belly = False
+        self.roach.anim_override = None
         self.fx("dust", 10)
         self.say(random.choice(Bubble.PANIC_PHRASES), urgent=True, life=100)
 
     def do_pose(self):
         self.brain.react_pose()
-        self.roach.target_alpha = 255
         self.roach.belly = False
         self.roach.target_scale = 1.15
+        self.roach.force_anim("review", 4.0)
         self.fx("star", 10)
         self.maybe_say(random.choice(Bubble.POSE_PHRASES), chance=0.5)
 
     def do_call(self):
         self.brain.react_call()
-        self.roach.target_alpha = 255
         self.roach.belly = False
+        self.roach.force_anim("waving", 3.0)
         self.fx("heart", 5)
         self._note_progress(call_count=1)
-        self.maybe_say(random.choice(Bubble.CALL_PHRASES), chance=0.4)
+        self.maybe_say(random.choice(Bubble.CALL_PHRASES), chance=0.45)
 
     def do_spar(self):
-        """假想敌对打：原地旋转扑腾。"""
-        self.brain.react_spin(26)
-        self.roach.spin_vel = 26
-        self.roach.target_alpha = 255
+        """扑击玩具老鼠 / 假想敌。"""
+        self.do_pounce()
+
+    def do_pounce(self):
+        self.brain.react_spin(22)
+        self.roach.spin_vel = 18
         self.roach.belly = False
+        self.roach.anim_override = None
         self.fx("dust", 8)
-        self.maybe_say(random.choice(["打打打!", "哈!", "谁怕谁!"]), chance=0.4)
+        self.maybe_say(random.choice(Bubble.POUNCE_PHRASES), chance=0.5)
+
+    def do_knead(self):
+        """踩奶。"""
+        self.brain._set(State.HAPPY, 110)
+        self.roach.belly = False
+        self.roach.target_scale = 1.1
+        self.roach.force_anim("waving", 4.0)
+        self.fx("heart", 8)
+        self.say(random.choice(Bubble.KNEAD_PHRASES), urgent=True, life=120)
+
+    def do_groom(self):
+        """舔毛整理仪表。"""
+        self.brain._set(State.POSE, 120)
+        self.roach.belly = False
+        self.roach.force_anim("review", 4.0)
+        self.fx("star", 4)
+        self.maybe_say(random.choice(Bubble.GROOM_PHRASES), chance=0.55)
+
+    def do_box(self):
+        """钻纸箱：换窝跑过去；途中 Running，到站 Waiting。"""
+        self.roach.belly = False
+        self.fx("star", 4)
+        self.say(random.choice(Bubble.BOX_PHRASES), urgent=True, life=110)
+        self.brain.go_hide(scramble=True)
+        self.roach.force_anim("waiting", 5.0)
 
     # ── 坐标换算 ──────────────────────────────────────────
 
@@ -3476,7 +3865,7 @@ class RoachPet:
         return False
 
     def _update_mouse_passthrough(self):
-        """鼠标不在蟑螂上时穿透点击；强制穿透模式下始终穿透。"""
+        """鼠标不在小猫上时穿透点击；强制穿透模式下始终穿透。"""
         if self.settings.get("click_through_force", False):
             if IS_MAC and self.window is not None:
                 self.window.setIgnoresMouseEvents_(True)
@@ -3535,7 +3924,7 @@ class RoachPet:
         if not self._hit(mx, my):
             return
 
-        # 睡觉时单击叫醒，稍后仍会钻回角落
+        # 睡觉时单击叫醒，稍后仍会回窝趴着
         if self.brain.state == State.SLEEP:
             self.brain._set(State.HAPPY, 50)
             self.roach.target_scale = 1.05
@@ -3553,7 +3942,7 @@ class RoachPet:
         if self._rest_active:
             self._rest_active = False
             self.bubbles.clear()
-            self.say("好,继续肝", urgent=True, life=90)
+            self.say("好,继续撸代码", urgent=True, life=90)
             self.fx("heart", 3)
             self.dragging = True
             self.drag_start = (event.locationInWindow().x, event.locationInWindow().y)
@@ -3592,8 +3981,8 @@ class RoachPet:
             self.click_count = 1
         self.click_time = now
 
-        # 头/尾分区：左半摸头，右半吓跑（相对贴图）
-        head_side = mx < WIN_W / 2
+        # 小猫正面：上半摸头，下半逗弄/吓跑
+        head_side = my < ROACH_Y + self.roach.sh * 0.48
 
         if self.click_count >= 3:
             self.click_count = 0
@@ -3601,14 +3990,14 @@ class RoachPet:
             self.brain.react_poke()
             self.roach.target_scale = 0.88
             self.fx("dust", 6)
-            # 三连击：吐槽 + 偶尔抛一句故事开头
+            # 三连击：炸毛吐槽
             if random.random() < 0.35:
                 opener = pick_story()[0]
                 self.say(opener, urgent=True, life=110)
             elif self._ai_available() and not self._ai_busy and random.random() < 0.4:
                 def worker():
                     try:
-                        text = generate_line(self.settings, "poke", "被连戳")
+                        text = generate_line(self.settings, "poke", "被连戳尾巴")
                     except LLMError:
                         text = random.choice(Bubble.POKE_PHRASES)
                     self._pending_ai.append(("say", text, 120, True))
@@ -3618,14 +4007,19 @@ class RoachPet:
         elif self.click_count == 2:
             self.brain.react_dblclick()
             self.roach.target_scale = 1.15
+            self.roach.force_anim("running", 2.0)
             self.fx("star", 5)
-            self.maybe_say("冲!", chance=0.2)
+            self.maybe_say(random.choice(["冲!", "跑酷!", "喵闪!", "起飞!"]), chance=0.3)
         elif head_side:
             self.brain.react_click()
             self.roach.target_scale = 1.08
+            self.roach.force_anim("waving", 2.0)
             self.fx("heart", 5)
             self._note_progress(pet_count=1)
             streak = self.brain.pet_streak
+            if streak >= 3 and streak % 3 == 0:
+                self.do_knead()
+                return
             if streak >= 5 and streak % 5 == 0:
                 self.say(random.choice(["好感爆棚!", "还要摸!", f"连摸{streak}下~"]), urgent=True)
                 self.fx("heart", 8)
@@ -3673,7 +4067,7 @@ class RoachPet:
                 self.brain.react_spin(22)
                 self.roach.spin_vel = 22
                 self.fx("dust", 8)
-                self.maybe_say("晕...", chance=0.25)
+                self.maybe_say(random.choice(["晕乎乎...", "天旋地转喵", "别摇了!"]), chance=0.3)
             else:
                 self.brain.react_drop(self.x - self.prev_x, self.y - self.prev_y)
                 if dist > 8:
@@ -3890,7 +4284,7 @@ class RoachPet:
         elif chars == "r":
             self.brain.react_dblclick()
             self.fx("star", 4)
-            self.maybe_say("冲!", chance=0.2)
+            self.maybe_say(random.choice(["冲!", "开跑!", "喵闪!"]), chance=0.25)
         elif chars == "q":
             self.do_peek()
         elif chars == "e":
@@ -3908,11 +4302,7 @@ class RoachPet:
         elif chars == "x":
             self.do_spar()
         elif chars == "n":
-            # 捉迷藏：先现身再立刻换角落躲
-            self.do_peek()
-            self.say("来抓我呀!", urgent=True, life=100)
-            self.brain.go_hide(scramble=True)
-            self.fx("dust", 5)
+            self.do_box()
         elif chars == ",":
             self.do_banter()
         elif chars == ".":
@@ -3947,7 +4337,7 @@ class RoachPet:
 
     def paint(self):
         self.canvas.fill((0, 0, 0, 0))
-        moving = abs(self.brain.vx) + abs(self.brain.vy) > 0.1
+        moving = math.hypot(self.brain.vx, self.brain.vy) > 0.45
         sleeping = self.brain.state == State.SLEEP
 
         self._draw_bubble()
@@ -4001,33 +4391,50 @@ class RoachPet:
         self._check_rest_reminder()
         self._check_buddy_banter()
         self._check_mouse_near(mx, my)
+        self._check_mouse_seek(mx, my)
+        self._maybe_finish_mouse_seek(mx, my)
 
         if not busy:
+            # 无有效目标时清掉残余速度，避免坐姿微平移
+            spd = math.hypot(self.brain.vx, self.brain.vy)
+            has_target = (
+                self.brain.target_x is not None
+                and math.hypot(
+                    self.x - self.brain.target_x,
+                    self.y - (self.brain.target_y or self.y),
+                ) > 10
+            )
+            if spd <= 0.45 and not has_target:
+                self.brain.vx = self.brain.vy = 0
             self.x += self.brain.vx
             self.y += self.brain.vy
             self.x, self.y = self.brain.clamp(self.x, self.y)
 
-        moving = abs(self.brain.vx) + abs(self.brain.vy) > 0.1
+        moving = math.hypot(self.brain.vx, self.brain.vy) > 0.45
         if moving:
             self.roach.set_facing(self.brain.vx, self.brain.vy)
 
         st = self.brain.state
         self.roach.belly = st == State.BELLY
+        hide_settled = False
         if st == State.HIDE:
-            # 藏好后更淡；逃窜途中稍亮一点
-            settled = (
+            hide_settled = (
                 self.brain.target_x is not None
                 and math.hypot(self.x - self.brain.target_x, self.y - (self.brain.target_y or self.y)) < 12
             )
-            self.roach.target_alpha = 55 if settled else 120
-            self.roach.target_scale = 0.92 if settled else 1.0
-        else:
-            self.roach.target_alpha = 255
+            # 回窝仍清晰可见，略缩小表示趴下
+            self.roach.target_scale = 0.94 if hide_settled else 1.0
+        self.roach.target_alpha = 255
+        self.roach.alpha = 255
 
+        # 移动统一 Running；静止再按状态选动作
+        anim = "running" if moving else cat_anim_for_state(st, False, hide_settled=hide_settled)
         self.roach.tick(
             moving, math.hypot(self.brain.vx, self.brain.vy),
             st == State.SLEEP, st == State.HAPPY,
-            dancing=(st == State.DANCE), spinning=(st == State.SPIN),
+            dancing=(st == State.DANCE) and not moving,
+            spinning=(st == State.SPIN) and not moving,
+            anim=anim,
         )
 
         if self.buddy and self.buddy.active:
@@ -4069,21 +4476,22 @@ class RoachPet:
             save_progress(self.app_root, self.progress)
 
     def _print_help_banner(self):
-        print("习性: 平时躲角落，互动才出来；鼠标凑近会换地方躲")
+        print("习性: 平时角落趴窝，互动才跑出来；鼠标凑近会换窝")
         print("产品: 菜单栏/托盘 | Ctrl+Alt+R召唤 /总览 P穿透 S状态 Q退出")
         print("设置: settings.json（气泡/提醒/穿透/话术包/皮肤）")
         print("打工: G提醒 J黑话混 Y对齐 | 1站会 2复盘 3摸鱼 4反PUA")
         print("监控: /总览  [CPU  ]内存  \\磁盘  '网络  (需 psutil)")
         print("财务: 5行话口头禅 6月结 7审计 8报销 9税务 0发薪 ;财务提醒")
-        print("互动: 点头摸/点尾吓 | 双击跑 | ⌘/Win召唤 Ctrl大餐 | 滚轮转")
+        print("互动: 上头摸/下身逗 | 双击跑 | 连摸踩奶 | ⌘/Win召唤 Ctrl大餐 | 滚轮转")
         print("      Alt喂食 Shift跳舞 | 右键睡 | 中键日期 | 方向键/空格")
-        print("双宠: ,对喷  .开关会计蟑螂 | Ctrl+Alt+B对喷")
+        print("双宠: ,对喷  .开关会计猫 | Ctrl+Alt+B对喷")
         print("故事: T / Ctrl+Alt+T 故事大会 | 菜单开关休息提醒(约每小时)")
+        print("寻访: 鼠标约30分钟不动会跑来找你互动 | 菜单可开关")
         print("AI: Ctrl+Alt+A开关 | 菜单切换厂商(deepseek/doubao/qwen) | secrets.json填Key")
-        print("快捷键: Q探头 E觅食 Z疯跑 K召唤 V受惊 O摆拍 I闲聊 X对打 N躲猫猫")
-        print("      M跟随 C躲 L追光 U翻肚 B回家 A舞 F喂 P戳 R跑")
+        print("猫咪: N纸箱 C回窝 E打猎/毛线 Q观鸟 Z跑酷 V炸毛 O摆拍 X扑击")
+        print("      U露肚 L激光 K召唤 M跟随 I闲聊 · 周期表演会舔毛")
         print("      -穿透 =皮肤 D日期 T故事 W天气 S状态 H帮助 Esc退出")
-        print("      报时: 中键点蟑螂 或 菜单状态")
+        print("      报时: 中键点小猫 或 菜单状态")
 
     def run(self):
         if IS_MAC:
@@ -4238,12 +4646,9 @@ class RoachPet:
         elif chars == "r":
             self.brain.react_dblclick()
             self.fx("star", 4)
-            self.maybe_say("冲!", chance=0.2)
+            self.maybe_say(random.choice(["冲!", "开跑!", "喵闪!"]), chance=0.25)
         elif chars == "n":
-            self.do_peek()
-            self.say("来抓我呀!", urgent=True, life=100)
-            self.brain.go_hide(scramble=True)
-            self.fx("dust", 5)
+            self.do_box()
         elif chars == ",":
             self.do_banter()
         elif chars == ".":
@@ -4288,7 +4693,7 @@ def create_pet() -> RoachPet:
 if __name__ == "__main__":
     # 打包后工作目录用 exe 旁；资源仍从 resource_dir / _MEIPASS 读
     os.chdir(app_dir())
-    print("🪳 桌宠已启动，按 Esc 退出")
+    print("🐱 小猫桌宠已启动，按 Esc 退出")
     print(f"   平台: {sys.platform} | 工作目录: {os.getcwd()}")
     print(f"   资源目录: {_BASE_DIR}")
     try:
