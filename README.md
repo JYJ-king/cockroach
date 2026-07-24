@@ -41,7 +41,14 @@ REM 或 run.bat
 
 ## 打包 Windows exe
 
-在 **Windows** 上：
+本机是 **macOS** 时，请用 GitHub Actions 在云端 Windows 上打包（推荐）：
+
+1. 打开仓库 **Actions** → 左侧 **Build Windows EXE**
+2. 点 **Run workflow**（或 push 到 `main` 自动触发）
+3. 等绿勾完成后，进入该次运行页面，底部 **Artifacts** 下载 `cockroach-pet-exe`
+4. 解压得到 `cockroach_pet.exe`，拷到 Windows 双击运行
+
+若已有 Windows 电脑，也可本地打包：
 
 ```bat
 build_win.bat

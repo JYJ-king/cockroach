@@ -29,3 +29,5 @@ jobs:
         with:
           name: cockroach-pet-exe
           path: dist/cockroach_pet.exe
+          if-no-files-found: error
+          retention-days: 14
