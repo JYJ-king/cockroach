@@ -1,0 +1,16 @@
+{
+  "affection": 5,
+  "pet_count": 3,
+  "feed_count": 1,
+  "call_count": 6,
+  "sys_alert_count": 0,
+  "banter_count": 0,
+  "titles": [
+    "一呼即来",
+    "初次摸摸"
+  ],
+  "unlocked_skins": [
+    "default"
+  ],
+  "stats": {}
+}

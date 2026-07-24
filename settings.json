@@ -1,0 +1,24 @@
+{
+  "bubbles_enabled": true,
+  "worker_reminders": true,
+  "finance_reminders": true,
+  "sys_alerts": true,
+  "sys_check_interval_min": 50,
+  "sys_check_interval_max": 90,
+  "click_through_force": false,
+  "follow_default": false,
+  "global_hotkeys": true,
+  "enabled_packs": [
+    "worker",
+    "finance",
+    "programmer"
+  ],
+  "skin": "default",
+  "hotkeys": {
+    "call": "<ctrl>+<alt>+r",
+    "overview": "<ctrl>+<alt>+/",
+    "passthrough": "<ctrl>+<alt>+p",
+    "quit": "<ctrl>+<alt>+q",
+    "status": "<ctrl>+<alt>+s"
+  }
+}
