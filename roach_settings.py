@@ -21,6 +21,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "accountant_buddy": True,
     "buddy_banter_min": 120,
     "buddy_banter_max": 280,
+    "idle_showcase": True,
+    "idle_showcase_min": 45,
+    "idle_showcase_max": 90,
+    "rest_reminder": True,
+    "rest_reminder_interval_sec": 3600,
     "enabled_packs": ["worker", "finance", "programmer", "accountant"],
     "skin": "default",
     "hotkeys": {
@@ -30,6 +35,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "quit": "<ctrl>+<alt>+q",
         "status": "<ctrl>+<alt>+s",
         "banter": "<ctrl>+<alt>+b",
+        "story": "<ctrl>+<alt>+t",
     },
 }
 
@@ -40,6 +46,7 @@ DEFAULT_PROGRESS: dict[str, Any] = {
     "call_count": 0,
     "sys_alert_count": 0,
     "banter_count": 0,
+    "story_count": 0,
     "titles": [],
     "unlocked_skins": ["default"],
     "stats": {},
@@ -54,6 +61,7 @@ ACHIEVEMENTS: list[dict[str, Any]] = [
     {"id": "aff_20", "title": "缝里挚友", "desc": "亲密度达到 20", "check": lambda p: p.get("affection", 0) >= 20},
     {"id": "aff_100", "title": "桌宠知己", "desc": "亲密度达到 100", "check": lambda p: p.get("affection", 0) >= 100},
     {"id": "banter_5", "title": "对账搭子", "desc": "与会计蟑螂对喷 5 次", "check": lambda p: p.get("banter_count", 0) >= 5},
+    {"id": "story_3", "title": "缝里说书人", "desc": "听完故事大会 3 次", "check": lambda p: p.get("story_count", 0) >= 3},
 ]
 
 

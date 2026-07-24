@@ -39,6 +39,13 @@ from roach_settings import (
 )
 from desktop_chrome import DesktopChrome
 from accountant_buddy import AccountantBuddy, BANTER_SCRIPTS
+from story_mode import (
+    CLICK_BANTER_PHRASES,
+    POKE_BANTER_PHRASES,
+    pick_rest_line,
+    pick_showcase_line,
+    pick_story,
+)
 
 OBJC_OK = False
 if IS_MAC:
@@ -1305,7 +1312,8 @@ class Bubble:
         "爬爬爬~", "嘎吱嘎吱", "嘿嘿", "我是小强!",
         "找点吃的", "休息一会儿", "别开灯...", "缝里最安全",
     ]
-    CLICK_PHRASES = ["嘿嘿", "好痒~", "开心!", "嘎吱~", "再摸一下"]
+    CLICK_PHRASES = CLICK_BANTER_PHRASES
+    POKE_PHRASES = POKE_BANTER_PHRASES
     FEED_PHRASES = ["好吃!", "嚼嚼", "谢谢~", "还有吗?", "香!"]
     CHAT_PHRASES = [
         "今天键盘很香", "你又坐很久了", "我在角落看着你",
@@ -2184,6 +2192,12 @@ class RoachPet:
         self._worker_fired: set[str] = set()
         self._next_proactive = time.time() + 180
         self._next_worker_idle = time.time() + 300
+        lo_sc = float(self.settings.get("idle_showcase_min") or 45)
+        hi_sc = float(self.settings.get("idle_showcase_max") or 90)
+        self._next_showcase = time.time() + random.uniform(min(lo_sc, hi_sc), max(lo_sc, hi_sc))
+        rest_iv = float(self.settings.get("rest_reminder_interval_sec") or 3600)
+        self._next_rest = time.time() + max(60.0, rest_iv)
+        self._rest_active = False
         lo = float(self.settings.get("sys_check_interval_min") or 50)
         hi = float(self.settings.get("sys_check_interval_max") or 90)
         self._next_sys_check = time.time() + random.uniform(lo, hi)
@@ -2499,6 +2513,12 @@ class RoachPet:
             self.do_banter()
         elif cmd == "toggle_buddy":
             self.toggle_buddy()
+        elif cmd == "story":
+            self.do_story()
+        elif cmd == "toggle_rest":
+            self.toggle_rest_reminder()
+        elif cmd == "toggle_showcase":
+            self.toggle_idle_showcase()
 
     def toggle_click_through(self):
         self.settings["click_through_force"] = not self.settings.get("click_through_force", False)
@@ -2786,6 +2806,63 @@ class RoachPet:
         self.say(random.choice(pool), urgent=True, life=160)
         self.fx("star", 3)
 
+    def do_story(self):
+        """故事大会：本地短篇连播气泡。"""
+        if self.buddy and self.buddy.bantering:
+            return
+        lines = pick_story()
+        self.bubbles.clear()
+        self.roach.target_alpha = 255
+        self.roach.belly = False
+        self.brain.react_pose()
+        self.fx("star", 6)
+        self.bubbles.push_many(lines, life=130)
+        self._note_progress(story_count=1)
+        self._rest_active = False
+
+    def do_rest_break(self):
+        """休息提醒：现身到屏幕偏中，拉伸并催休息。"""
+        if self.buddy and self.buddy.bantering:
+            self._next_rest = time.time() + 120
+            return
+        sw, sh = get_desktop_size()
+        self.x = float((sw - WIN_W) // 2)
+        self.y = float(max(40, (sh - WIN_H) // 2))
+        self.brain.target_x = self.brain.target_y = None
+        self.brain.vx = self.brain.vy = 0
+        self.roach.target_alpha = 255
+        self.roach.belly = False
+        self._rest_active = True
+        self.bubbles.clear()
+        line = pick_rest_line()
+        self.bubbles.push_many([line, "起来活动一下", "点我可关掉提示"], life=140)
+        self.brain.react_dance()
+        self.fx("star", 8)
+
+    def toggle_rest_reminder(self):
+        on = not self.settings.get("rest_reminder", True)
+        self.settings["rest_reminder"] = on
+        save_settings(self.app_root, self.settings)
+        if on:
+            iv = float(self.settings.get("rest_reminder_interval_sec") or 3600)
+            self._next_rest = time.time() + max(60.0, iv)
+            self.say("休息提醒开", urgent=True)
+        else:
+            self._rest_active = False
+            self.say("休息提醒关", urgent=True)
+
+    def toggle_idle_showcase(self):
+        on = not self.settings.get("idle_showcase", True)
+        self.settings["idle_showcase"] = on
+        save_settings(self.app_root, self.settings)
+        if on:
+            lo = float(self.settings.get("idle_showcase_min") or 45)
+            hi = float(self.settings.get("idle_showcase_max") or 90)
+            self._next_showcase = time.time() + random.uniform(min(lo, hi), max(lo, hi))
+            self.say("周期表演开", urgent=True)
+        else:
+            self.say("周期表演关", urgent=True)
+
     def say_help(self):
         self.bubbles.clear()
         self.bubbles.push_many([
@@ -2795,9 +2872,10 @@ class RoachPet:
             "9税务 0发薪 6月结 7审计 8报销",
             "1站会 2复盘 3摸鱼 4反PUA",
             "Q探头 E觅食 Z疯跑 H帮助",
-            "Ctrl+Alt+R召唤 P穿透 B对喷",
+            "T故事大会 D日期 W天气 S状态",
+            "Ctrl+Alt+R召唤 P穿透 B对喷 T故事",
             ",对喷 .开关会计蟑螂",
-            "菜单栏/托盘可开关提醒",
+            "菜单:故事大会/休息提醒",
         ], life=150)
 
     def _check_sys_alerts(self):
@@ -2943,6 +3021,78 @@ class RoachPet:
         else:
             self.maybe_say(random.choice(["喝口水?", "活动下~", "发票呢?"]), chance=0.4)
             self.brain.go_hide()
+
+    def _check_idle_showcase(self):
+        """周期随机表演：短暂现身 + 一句闲聊（对标 DeskTopPet 定时切动作/文字）。"""
+        if not self.settings.get("idle_showcase", True):
+            return
+        now = time.time()
+        if now < self._next_showcase:
+            return
+        lo = float(self.settings.get("idle_showcase_min") or 45)
+        hi = float(self.settings.get("idle_showcase_max") or 90)
+        self._next_showcase = now + random.uniform(min(lo, hi), max(lo, hi))
+        if self.dragging or self.right_dragging:
+            return
+        if self.buddy and self.buddy.bantering:
+            return
+        if self.brain.state in (State.SLEEP, State.DRAGGED, State.LASER, State.PANIC, State.RUN, State.FOLLOW):
+            return
+        if self.bubbles.current or self.bubbles._q:
+            return
+
+        pool = (
+            list(PACKS.pool("chat", []))
+            + Bubble.CHAT_PHRASES[:12]
+            + [pick_showcase_line() for _ in range(3)]
+        )
+        line = random.choice(pool) if pool else pick_showcase_line()
+
+        # 躲着时多半只嘀咕；偶尔探头表演
+        if self.brain.state == State.HIDE:
+            if random.random() < 0.55:
+                self.say(line, life=110)
+                return
+            self.roach.target_alpha = 255
+            self.brain.react_peek()
+            self.say(line, life=120)
+            self.fx("star", 2)
+            return
+
+        self.roach.target_alpha = 255
+        act = random.random()
+        if act < 0.28:
+            self.brain.react_peek()
+        elif act < 0.55:
+            self.brain.react_pose()
+        elif act < 0.78:
+            self.brain.react_dance()
+            self.fx("star", 4)
+        else:
+            self.brain.react_spin(12)
+            self.roach.spin_vel = 12
+            self.fx("dust", 3)
+        self.say(line, life=120)
+
+    def _check_rest_reminder(self):
+        """每小时休息提醒（对标 DeskTopPet haveRest）。"""
+        if not self.settings.get("rest_reminder", True):
+            return
+        now = time.time()
+        if now < self._next_rest:
+            return
+        iv = float(self.settings.get("rest_reminder_interval_sec") or 3600)
+        self._next_rest = now + max(60.0, iv)
+        if self.brain.state in (State.SLEEP, State.DRAGGED, State.LASER, State.PANIC):
+            self._next_rest = now + 180
+            return
+        if self.bubbles.current or self.bubbles._q:
+            self._next_rest = now + 90
+            return
+        hour = datetime.now().hour
+        if hour < 8 or hour >= 23:
+            return
+        self.do_rest_break()
 
     def _check_worker_idle_nudge(self):
         """久坐轻推：间隔较长，只在工作时段。"""
@@ -3212,6 +3362,21 @@ class RoachPet:
             self.press_pos = (mx, my)
             self.moved_while_press = False
             self.shake_accum = 0.0
+            self._rest_active = False
+            return
+
+        # 点击可取消当次休息提示
+        if self._rest_active:
+            self._rest_active = False
+            self.bubbles.clear()
+            self.say("好,继续肝", urgent=True, life=90)
+            self.fx("heart", 3)
+            self.dragging = True
+            self.drag_start = (event.locationInWindow().x, event.locationInWindow().y)
+            self.press_time = time.time()
+            self.press_pos = (mx, my)
+            self.moved_while_press = False
+            self.shake_accum = 0.0
             return
 
         # 翻肚时点一下翻回来
@@ -3252,7 +3417,12 @@ class RoachPet:
             self.brain.react_poke()
             self.roach.target_scale = 0.88
             self.fx("dust", 6)
-            self.maybe_say("呀!", chance=0.25)
+            # 三连击：吐槽 + 偶尔抛一句故事开头
+            if random.random() < 0.35:
+                opener = pick_story()[0]
+                self.say(opener, urgent=True, life=110)
+            else:
+                self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.55)
         elif self.click_count == 2:
             self.brain.react_dblclick()
             self.roach.target_scale = 1.15
@@ -3268,12 +3438,12 @@ class RoachPet:
                 self.say(random.choice(["好感爆棚!", "还要摸!", f"连摸{streak}下~"]), urgent=True)
                 self.fx("heart", 8)
             else:
-                self.maybe_say(random.choice(Bubble.CLICK_PHRASES), chance=0.22)
+                self.maybe_say(random.choice(Bubble.CLICK_PHRASES), chance=0.35)
         else:
             self.brain.react_poke()
             self.roach.target_scale = 0.92
             self.fx("dust", 5)
-            self.maybe_say("别碰屁股!", chance=0.15)
+            self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.4)
 
         self.dragging = True
         self.drag_start = (event.locationInWindow().x, event.locationInWindow().y)
@@ -3441,7 +3611,7 @@ class RoachPet:
         if chars == "d":
             self.say_date()
         elif chars == "t":
-            self.say_time()
+            self.do_story()
         elif chars == "w":
             self.say_weather()
         elif chars == "s":
@@ -3451,7 +3621,7 @@ class RoachPet:
         elif chars == "p":
             self.brain.react_poke()
             self.fx("dust", 5)
-            self.maybe_say("呀!", chance=0.2)
+            self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.35)
         elif chars == "a":
             self.do_dance()
         elif chars == "m":
@@ -3618,6 +3788,8 @@ class RoachPet:
         self._check_worker_idle_nudge()
         self._check_sys_alerts()
         self._check_proactive()
+        self._check_idle_showcase()
+        self._check_rest_reminder()
         self._check_buddy_banter()
         self._check_mouse_near(mx, my)
 
@@ -3697,9 +3869,11 @@ class RoachPet:
         print("互动: 点头摸/点尾吓 | 双击跑 | ⌘/Win召唤 Ctrl大餐 | 滚轮转")
         print("      Alt喂食 Shift跳舞 | 右键睡 | 中键日期 | 方向键/空格")
         print("双宠: ,对喷  .开关会计蟑螂 | Ctrl+Alt+B对喷")
+        print("故事: T / Ctrl+Alt+T 故事大会 | 菜单开关休息提醒(约每小时)")
         print("快捷键: Q探头 E觅食 Z疯跑 K召唤 V受惊 O摆拍 I闲聊 X对打 N躲猫猫")
         print("      M跟随 C躲 L追光 U翻肚 B回家 A舞 F喂 P戳 R跑")
-        print("      -穿透 =皮肤 D日期 T时间 W天气 S状态 H帮助 Esc退出")
+        print("      -穿透 =皮肤 D日期 T故事 W天气 S状态 H帮助 Esc退出")
+        print("      报时: 中键点蟑螂 或 菜单状态")
 
     def run(self):
         if IS_MAC:
@@ -3806,7 +3980,7 @@ class RoachPet:
         # 复用 mac 字符分支：构造伪 NS key 事件太重，直接复制映射
         mapping = {
             "d": self.say_date,
-            "t": self.say_time,
+            "t": self.do_story,
             "w": self.say_weather,
             "s": self.say_status,
             "f": self.do_feed,
@@ -3850,7 +4024,7 @@ class RoachPet:
         if chars == "p":
             self.brain.react_poke()
             self.fx("dust", 5)
-            self.maybe_say("呀!", chance=0.2)
+            self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.35)
         elif chars == "r":
             self.brain.react_dblclick()
             self.fx("star", 4)
