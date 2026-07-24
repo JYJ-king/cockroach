@@ -73,13 +73,14 @@ class DesktopChrome:
             hk.get("status", "<ctrl>+<alt>+s"): lambda: self._emit("status"),
             hk.get("banter", "<ctrl>+<alt>+b"): lambda: self._emit("banter"),
             hk.get("story", "<ctrl>+<alt>+t"): lambda: self._emit("story"),
+            hk.get("ai", "<ctrl>+<alt>+a"): lambda: self._emit("toggle_ai"),
         }
         try:
             self._hotkey_listener = keyboard.GlobalHotKeys(mapping)
             self._hotkey_listener.daemon = True
             self._hotkey_listener.start()
             print(
-                "全局热键: Ctrl+Alt+R召唤 /总览 P穿透 S状态 B对喷 T故事 Q退出"
+                "全局热键: Ctrl+Alt+R召唤 /总览 P穿透 S状态 B对喷 T故事 A开AI Q退出"
                 "（Mac 若无效请在「辅助功能」允许终端/Python）"
             )
         except Exception as exc:
@@ -136,6 +137,8 @@ class DesktopChrome:
         add("开关会计蟑螂", "toggle_buddy")
         add("故事大会", "story")
         add("开关休息提醒", "toggle_rest")
+        add("开关 AI", "toggle_ai")
+        add("切换 AI 厂商", "cycle_ai_provider")
         add("显示称号", "titles")
         add("重载话术包", "reload_packs")
         menu.addItem_(NSMenuItem.separatorItem())
@@ -179,6 +182,8 @@ class DesktopChrome:
             pystray.MenuItem("开关会计蟑螂", on("toggle_buddy")),
             pystray.MenuItem("故事大会", on("story")),
             pystray.MenuItem("开关休息提醒", on("toggle_rest")),
+            pystray.MenuItem("开关 AI", on("toggle_ai")),
+            pystray.MenuItem("切换 AI 厂商", on("cycle_ai_provider")),
             pystray.MenuItem("显示称号", on("titles")),
             pystray.MenuItem("重载话术包", on("reload_packs")),
             pystray.Menu.SEPARATOR,

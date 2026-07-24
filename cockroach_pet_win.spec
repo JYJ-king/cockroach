@@ -14,7 +14,7 @@ a = Analysis(
         ('packs', 'packs'),
         ('skins', 'skins'),
     ],
-    hiddenimports=['psutil', 'pynput', 'pystray', 'PIL', 'roach_settings', 'phrase_packs', 'desktop_chrome', 'accountant_buddy', 'story_mode'],
+    hiddenimports=['psutil', 'pynput', 'pystray', 'PIL', 'roach_settings', 'phrase_packs', 'desktop_chrome', 'accountant_buddy', 'story_mode', 'llm_client'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

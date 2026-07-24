@@ -28,6 +28,29 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "rest_reminder_interval_sec": 3600,
     "enabled_packs": ["worker", "finance", "programmer", "accountant"],
     "skin": "default",
+    "ai": {
+        "enabled": False,
+        "provider": "deepseek",
+        "timeout_sec": 12,
+        "max_chars": 24,
+        "providers": {
+            "deepseek": {
+                "api_key": "",
+                "base_url": "https://api.deepseek.com/v1",
+                "model": "deepseek-chat",
+            },
+            "doubao": {
+                "api_key": "",
+                "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+                "model": "",
+            },
+            "qwen": {
+                "api_key": "",
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "model": "qwen-turbo",
+            },
+        },
+    },
     "hotkeys": {
         "call": "<ctrl>+<alt>+r",
         "overview": "<ctrl>+<alt>+/",
@@ -36,6 +59,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "status": "<ctrl>+<alt>+s",
         "banter": "<ctrl>+<alt>+b",
         "story": "<ctrl>+<alt>+t",
+        "ai": "<ctrl>+<alt>+a",
     },
 }
 
@@ -69,6 +93,10 @@ def settings_path(app_dir: str) -> str:
     return os.path.join(app_dir, "settings.json")
 
 
+def secrets_path(app_dir: str) -> str:
+    return os.path.join(app_dir, "secrets.json")
+
+
 def progress_path(app_dir: str) -> str:
     return os.path.join(app_dir, "progress.json")
 
@@ -83,27 +111,51 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def _load_secrets_overlay(app_dir: str) -> dict[str, Any]:
+    """可选 secrets.json：仅覆盖 ai.providers.*.api_key 等敏感项，勿提交仓库。"""
+    path = secrets_path(app_dir)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def load_settings(app_dir: str) -> dict[str, Any]:
     path = settings_path(app_dir)
     if not os.path.isfile(path):
         data = deepcopy(DEFAULT_SETTINGS)
         save_settings(app_dir, data)
-        return data
+        return _deep_merge(data, _load_secrets_overlay(app_dir))
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
         if not isinstance(raw, dict):
             return deepcopy(DEFAULT_SETTINGS)
-        return _deep_merge(DEFAULT_SETTINGS, raw)
+        merged = _deep_merge(DEFAULT_SETTINGS, raw)
+        return _deep_merge(merged, _load_secrets_overlay(app_dir))
     except (OSError, json.JSONDecodeError):
         return deepcopy(DEFAULT_SETTINGS)
 
 
 def save_settings(app_dir: str, data: dict[str, Any]) -> None:
     path = settings_path(app_dir)
+    to_save = deepcopy(data)
+    # 若存在 secrets.json，不把内存里的 api_key 写回 settings.json
+    if os.path.isfile(secrets_path(app_dir)):
+        ai = to_save.get("ai")
+        if isinstance(ai, dict):
+            providers = ai.get("providers") or {}
+            if isinstance(providers, dict):
+                for p in providers.values():
+                    if isinstance(p, dict) and "api_key" in p:
+                        p["api_key"] = ""
     try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(to_save, f, ensure_ascii=False, indent=2)
     except OSError as exc:
         print(f"⚠️ 无法保存设置: {exc}")
 

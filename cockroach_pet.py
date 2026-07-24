@@ -38,13 +38,22 @@ from roach_settings import (
     save_settings,
 )
 from desktop_chrome import DesktopChrome
-from accountant_buddy import AccountantBuddy, BANTER_SCRIPTS
+from accountant_buddy import AccountantBuddy
 from story_mode import (
     CLICK_BANTER_PHRASES,
     POKE_BANTER_PHRASES,
     pick_rest_line,
     pick_showcase_line,
     pick_story,
+)
+from llm_client import (
+    PROVIDER_ORDER,
+    LLMError,
+    current_provider_name,
+    generate_banter_script,
+    generate_line,
+    generate_story_lines,
+    provider_ready,
 )
 
 OBJC_OK = False
@@ -2187,6 +2196,8 @@ class RoachPet:
         self._weather: str | None = None
         self._weather_ready = False
         self._pending_say: list[tuple[str, int]] = []
+        self._pending_ai: list[tuple] = []
+        self._ai_busy = False
         self._cmd_q: queue.Queue[str] = queue.Queue()
         self._last_hour_chime = -1
         self._worker_fired: set[str] = set()
@@ -2304,23 +2315,17 @@ class RoachPet:
 
     def do_banter(self):
         """手动触发一次打工蟑螂 vs 会计蟑螂对喷。"""
-        if not self.settings.get("accountant_buddy", True):
-            self.settings["accountant_buddy"] = True
-            save_settings(self.app_root, self.settings)
-        if self.buddy is None:
-            self._init_buddy()
-        if self.buddy is None:
-            return
-        self.buddy.active = True
-        self._sync_layout()
-        self.roach.target_alpha = 255
-        if self.brain.state == State.HIDE:
-            self.brain._set(State.GREET, 160)
-        self.buddy.start_banter()
-        self._note_progress(banter_count=1)
-        lo = float(self.settings.get("buddy_banter_min") or 120)
-        hi = float(self.settings.get("buddy_banter_max") or 280)
-        self._next_banter = time.time() + random.uniform(min(lo, hi), max(lo, hi))
+        if self._ai_available() and not self._ai_skip_busy():
+            def worker():
+                try:
+                    script = generate_banter_script(self.settings)
+                    self._pending_ai.append(("banter", script))
+                except LLMError:
+                    self._pending_ai.append(("banter", None))
+
+            if self._run_ai("banter", worker, "对喷想词中..."):
+                return
+        self._start_banter_with_script(None)
 
     def toggle_buddy(self):
         on = not self.settings.get("accountant_buddy", True)
@@ -2519,6 +2524,10 @@ class RoachPet:
             self.toggle_rest_reminder()
         elif cmd == "toggle_showcase":
             self.toggle_idle_showcase()
+        elif cmd == "toggle_ai":
+            self.toggle_ai()
+        elif cmd == "cycle_ai_provider":
+            self.cycle_ai_provider()
 
     def toggle_click_through(self):
         self.settings["click_through_force"] = not self.settings.get("click_through_force", False)
@@ -2562,6 +2571,84 @@ class RoachPet:
         while self._pending_say:
             text, life = self._pending_say.pop(0)
             self.bubbles.push(text, life)
+        while self._pending_ai:
+            item = self._pending_ai.pop(0)
+            kind = item[0]
+            if kind == "say":
+                _, text, life, urgent = item
+                self.say(text, life=life, urgent=urgent)
+            elif kind == "story":
+                _, lines = item
+                self.bubbles.clear()
+                self.bubbles.push_many(lines, life=130)
+                self._note_progress(story_count=1)
+            elif kind == "banter":
+                _, script = item
+                self._start_banter_with_script(script)
+            elif kind == "fail":
+                _, text = item
+                self.say(text, urgent=True, life=120)
+
+    def _ai_context(self) -> str:
+        now = datetime.now()
+        bits = [greeting_by_period(), f"{now.hour}点"]
+        if is_workday(now):
+            bits.append("工作日")
+        if self.brain.state == State.HIDE:
+            bits.append("躲着")
+        return " ".join(bits)
+
+    def _ai_available(self) -> bool:
+        return provider_ready(self.settings)
+
+    def _ai_skip_busy(self) -> bool:
+        if self._ai_busy:
+            return True
+        if self.buddy and self.buddy.bantering:
+            return True
+        if len(self.bubbles._q) > 4:
+            return True
+        return False
+
+    def _run_ai(self, kind: str, worker, thinking: str = "想词中..."):
+        """后台线程跑 LLM；结果写入 _pending_ai。"""
+        if not self._ai_available() or self._ai_skip_busy():
+            return False
+        self._ai_busy = True
+        if thinking:
+            self.say(thinking, urgent=True, life=90)
+
+        def job():
+            try:
+                worker()
+            except LLMError:
+                self._pending_ai.append(("fail", "AI没词,用本地的"))
+            except Exception:
+                self._pending_ai.append(("fail", "AI开小差了"))
+            finally:
+                self._ai_busy = False
+
+        threading.Thread(target=job, daemon=True).start()
+        return True
+
+    def _start_banter_with_script(self, script: list[tuple[str, str]] | None = None):
+        if not self.settings.get("accountant_buddy", True):
+            self.settings["accountant_buddy"] = True
+            save_settings(self.app_root, self.settings)
+        if self.buddy is None:
+            self._init_buddy()
+        if self.buddy is None:
+            return
+        self.buddy.active = True
+        self._sync_layout()
+        self.roach.target_alpha = 255
+        if self.brain.state == State.HIDE:
+            self.brain._set(State.GREET, 160)
+        self.buddy.start_banter(script)
+        self._note_progress(banter_count=1)
+        lo = float(self.settings.get("buddy_banter_min") or 120)
+        hi = float(self.settings.get("buddy_banter_max") or 280)
+        self._next_banter = time.time() + random.uniform(min(lo, hi), max(lo, hi))
 
     def _queue_startup_greetings(self):
         if self.settings.get("bubbles_enabled", True):
@@ -2795,30 +2882,56 @@ class RoachPet:
     def do_chat(self):
         self.brain._set(State.GREET, 80)
         self.roach.target_alpha = 255
-        pool = (
-            Bubble.CHAT_PHRASES
-            + PACKS.pool("chat", [])
-            + PACKS.pool("worker_buzz", WORKER_BUZZ)[:20]
-            + PACKS.pool("finance_buzz", FINANCE_BUZZ)[:20]
-            + PACKS.pool("finance_catchphrases", FINANCE_CATCHPHRASES)[:20]
-            + PACKS.pool("programmer_buzz", [])[:15]
-        )
-        self.say(random.choice(pool), urgent=True, life=160)
         self.fx("star", 3)
+        ctx = self._ai_context()
+
+        def local_line():
+            pool = (
+                Bubble.CHAT_PHRASES
+                + PACKS.pool("chat", [])
+                + PACKS.pool("worker_buzz", WORKER_BUZZ)[:20]
+                + PACKS.pool("finance_buzz", FINANCE_BUZZ)[:20]
+                + PACKS.pool("finance_catchphrases", FINANCE_CATCHPHRASES)[:20]
+                + PACKS.pool("programmer_buzz", [])[:15]
+            )
+            return random.choice(pool)
+
+        if self._ai_available() and not self._ai_skip_busy():
+            def worker():
+                try:
+                    line = generate_line(self.settings, "chat", ctx)
+                    self._pending_ai.append(("say", line, 160, True))
+                except LLMError:
+                    self._pending_ai.append(("say", local_line(), 160, True))
+
+            if self._run_ai("chat", worker):
+                return
+        self.say(local_line(), urgent=True, life=160)
 
     def do_story(self):
-        """故事大会：本地短篇连播气泡。"""
+        """故事大会：AI 或本地短篇连播气泡。"""
         if self.buddy and self.buddy.bantering:
             return
-        lines = pick_story()
-        self.bubbles.clear()
         self.roach.target_alpha = 255
         self.roach.belly = False
         self.brain.react_pose()
         self.fx("star", 6)
+        self._rest_active = False
+
+        if self._ai_available() and not self._ai_skip_busy():
+            def worker():
+                try:
+                    lines = generate_story_lines(self.settings)
+                    self._pending_ai.append(("story", lines))
+                except LLMError:
+                    self._pending_ai.append(("story", pick_story()))
+
+            if self._run_ai("story", worker, "编故事中..."):
+                return
+        lines = pick_story()
+        self.bubbles.clear()
         self.bubbles.push_many(lines, life=130)
         self._note_progress(story_count=1)
-        self._rest_active = False
 
     def do_rest_break(self):
         """休息提醒：现身到屏幕偏中，拉伸并催休息。"""
@@ -2863,6 +2976,39 @@ class RoachPet:
         else:
             self.say("周期表演关", urgent=True)
 
+    def toggle_ai(self):
+        ai = self.settings.setdefault("ai", {})
+        if not isinstance(ai, dict):
+            ai = {}
+            self.settings["ai"] = ai
+        on = not bool(ai.get("enabled"))
+        ai["enabled"] = on
+        save_settings(self.app_root, self.settings)
+        if on:
+            name = current_provider_name(self.settings)
+            if provider_ready(self.settings):
+                self.say(f"AI开:{name}", urgent=True)
+            else:
+                self.say(f"AI开但{name}缺Key", urgent=True)
+        else:
+            self.say("AI关,用本地词", urgent=True)
+
+    def cycle_ai_provider(self):
+        ai = self.settings.setdefault("ai", {})
+        if not isinstance(ai, dict):
+            ai = {}
+            self.settings["ai"] = ai
+        cur = current_provider_name(self.settings)
+        try:
+            idx = PROVIDER_ORDER.index(cur)
+        except ValueError:
+            idx = 0
+        nxt = PROVIDER_ORDER[(idx + 1) % len(PROVIDER_ORDER)]
+        ai["provider"] = nxt
+        save_settings(self.app_root, self.settings)
+        ready = "已配Key" if provider_ready(self.settings, nxt) else "缺Key"
+        self.say(f"AI厂商:{nxt}({ready})", urgent=True)
+
     def say_help(self):
         self.bubbles.clear()
         self.bubbles.push_many([
@@ -2873,9 +3019,9 @@ class RoachPet:
             "1站会 2复盘 3摸鱼 4反PUA",
             "Q探头 E觅食 Z疯跑 H帮助",
             "T故事大会 D日期 W天气 S状态",
-            "Ctrl+Alt+R召唤 P穿透 B对喷 T故事",
+            "Ctrl+Alt+R召唤 P穿透 B对喷 T故事 A开AI",
             ",对喷 .开关会计蟑螂",
-            "菜单:故事大会/休息提醒",
+            "菜单:故事/休息/AI开关与厂商",
         ], life=150)
 
     def _check_sys_alerts(self):
@@ -3048,31 +3194,64 @@ class RoachPet:
         )
         line = random.choice(pool) if pool else pick_showcase_line()
 
-        # 躲着时多半只嘀咕；偶尔探头表演
-        if self.brain.state == State.HIDE:
-            if random.random() < 0.55:
-                self.say(line, life=110)
+        def apply_line(text: str):
+            if self.brain.state == State.HIDE:
+                if random.random() < 0.55:
+                    self.say(text, life=110)
+                    return
+                self.roach.target_alpha = 255
+                self.brain.react_peek()
+                self.say(text, life=120)
+                self.fx("star", 2)
                 return
             self.roach.target_alpha = 255
-            self.brain.react_peek()
-            self.say(line, life=120)
-            self.fx("star", 2)
-            return
+            act = random.random()
+            if act < 0.28:
+                self.brain.react_peek()
+            elif act < 0.55:
+                self.brain.react_pose()
+            elif act < 0.78:
+                self.brain.react_dance()
+                self.fx("star", 4)
+            else:
+                self.brain.react_spin(12)
+                self.roach.spin_vel = 12
+                self.fx("dust", 3)
+            self.say(text, life=120)
 
-        self.roach.target_alpha = 255
-        act = random.random()
-        if act < 0.28:
-            self.brain.react_peek()
-        elif act < 0.55:
-            self.brain.react_pose()
-        elif act < 0.78:
-            self.brain.react_dance()
-            self.fx("star", 4)
-        else:
-            self.brain.react_spin(12)
-            self.roach.spin_vel = 12
-            self.fx("dust", 3)
-        self.say(line, life=120)
+        if self._ai_available() and not self._ai_busy and random.random() < 0.45:
+            ctx = self._ai_context()
+
+            def worker():
+                try:
+                    text = generate_line(self.settings, "showcase", ctx)
+                except LLMError:
+                    text = line
+                self._pending_ai.append(("say", text, 120, False))
+
+            # 先做动作，台词异步到达
+            if self.brain.state != State.HIDE or random.random() >= 0.55:
+                self.roach.target_alpha = 255
+                if self.brain.state == State.HIDE:
+                    self.brain.react_peek()
+                    self.fx("star", 2)
+                else:
+                    act = random.random()
+                    if act < 0.28:
+                        self.brain.react_peek()
+                    elif act < 0.55:
+                        self.brain.react_pose()
+                    elif act < 0.78:
+                        self.brain.react_dance()
+                        self.fx("star", 4)
+                    else:
+                        self.brain.react_spin(12)
+                        self.roach.spin_vel = 12
+                        self.fx("dust", 3)
+            if self._run_ai("showcase", worker, thinking=""):
+                return
+
+        apply_line(line)
 
     def _check_rest_reminder(self):
         """每小时休息提醒（对标 DeskTopPet haveRest）。"""
@@ -3421,6 +3600,14 @@ class RoachPet:
             if random.random() < 0.35:
                 opener = pick_story()[0]
                 self.say(opener, urgent=True, life=110)
+            elif self._ai_available() and not self._ai_busy and random.random() < 0.4:
+                def worker():
+                    try:
+                        text = generate_line(self.settings, "poke", "被连戳")
+                    except LLMError:
+                        text = random.choice(Bubble.POKE_PHRASES)
+                    self._pending_ai.append(("say", text, 120, True))
+                self._run_ai("poke", worker, thinking="")
             else:
                 self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.55)
         elif self.click_count == 2:
@@ -3437,13 +3624,30 @@ class RoachPet:
             if streak >= 5 and streak % 5 == 0:
                 self.say(random.choice(["好感爆棚!", "还要摸!", f"连摸{streak}下~"]), urgent=True)
                 self.fx("heart", 8)
+            elif self._ai_available() and not self._ai_busy and random.random() < 0.2:
+                def worker():
+                    try:
+                        text = generate_line(self.settings, "click", "被摸头")
+                    except LLMError:
+                        text = random.choice(Bubble.CLICK_PHRASES)
+                    self._pending_ai.append(("say", text, 120, True))
+                self._run_ai("click", worker, thinking="")
             else:
                 self.maybe_say(random.choice(Bubble.CLICK_PHRASES), chance=0.35)
         else:
             self.brain.react_poke()
             self.roach.target_scale = 0.92
             self.fx("dust", 5)
-            self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.4)
+            if self._ai_available() and not self._ai_busy and random.random() < 0.25:
+                def worker():
+                    try:
+                        text = generate_line(self.settings, "poke", "戳尾巴")
+                    except LLMError:
+                        text = random.choice(Bubble.POKE_PHRASES)
+                    self._pending_ai.append(("say", text, 120, True))
+                self._run_ai("poke", worker, thinking="")
+            else:
+                self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.4)
 
         self.dragging = True
         self.drag_start = (event.locationInWindow().x, event.locationInWindow().y)
@@ -3870,6 +4074,7 @@ class RoachPet:
         print("      Alt喂食 Shift跳舞 | 右键睡 | 中键日期 | 方向键/空格")
         print("双宠: ,对喷  .开关会计蟑螂 | Ctrl+Alt+B对喷")
         print("故事: T / Ctrl+Alt+T 故事大会 | 菜单开关休息提醒(约每小时)")
+        print("AI: Ctrl+Alt+A开关 | 菜单切换厂商(deepseek/doubao/qwen) | secrets.json填Key")
         print("快捷键: Q探头 E觅食 Z疯跑 K召唤 V受惊 O摆拍 I闲聊 X对打 N躲猫猫")
         print("      M跟随 C躲 L追光 U翻肚 B回家 A舞 F喂 P戳 R跑")
         print("      -穿透 =皮肤 D日期 T故事 W天气 S状态 H帮助 Esc退出")
