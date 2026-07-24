@@ -2223,7 +2223,7 @@ class RoachPet:
             self.buddy = None
             self._sync_layout()
             return
-        buddy_roach = RoachRenderer(skin="gold")
+        buddy_roach = RoachRenderer(skin="default")
         self.buddy = AccountantBuddy(
             buddy_roach,
             self.font,

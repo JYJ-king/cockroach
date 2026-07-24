@@ -78,7 +78,7 @@ BANTER_SCRIPTS: list[list[tuple[str, str]]] = [
 
 
 class AccountantBuddy:
-    """金色会计蟑螂：画在主窗口右侧槽，自己排队说话。"""
+    """会计蟑螂同伴：画在主窗口右侧槽，自己排队说话。"""
 
     def __init__(
         self,
@@ -171,18 +171,16 @@ class AccountantBuddy:
                 else:
                     self._feed_next_line()
 
-        # 对喷时兴奋现身；平时完全隐去
+        # 对喷时现身跳舞；不用 happy 黄光，保持普通棕色
         if self.bantering:
             self.roach.target_alpha = 255
             self.roach.target_scale = 1.05 + 0.03 * math.sin(pygame.time.get_ticks() * 0.01)
-            happy = True
         else:
             self.roach.target_alpha = 0
             self.roach.target_scale = 0.95
-            happy = False
 
         self.roach.set_facing(-1, 0)
-        self.roach.tick(False, 0.2, False, happy, dancing=self.bantering)
+        self.roach.tick(False, 0.2, False, False, dancing=self.bantering)
 
     def draw(self, canvas: pygame.Surface, pad_x: int, roach_y: int, pet_w: int) -> None:
         if not self.active or self.roach.alpha < 1:
