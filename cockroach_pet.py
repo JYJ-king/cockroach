@@ -118,8 +118,12 @@ DUAL_WIN_W = WIN_W + BUDDY_SLOT_W
 WALK_SPEED = 1.8
 RUN_SPEED = 3.6
 BOB_AMPLITUDE = 3.5
-# 照片头大致朝左上；加载时会按前胸位置自动转正，此值为回退角
+# 原图 cockroach.png：头（触角/前胸）在左上，翅尖（尾）在右下。
+# 加载时按此角转正：头朝上、尾朝下。pygame 正角为逆时针。
 SPRITE_ROTATE_DEG = -45
+# 转正后本地朝向（与 set_facing 同一套 atan2(vy,vx)，屏坐标 y 向下）：
+# 0=右, 90=下, ±180=左, -90=上。转正后头朝上 → -90。
+SPRITE_UPRIGHT_HEADING = -90.0
 LEG_COLOR = (138, 72, 32)
 LEG_COLOR_DARK = (100, 48, 20)
 ANTENNA_COLOR = (90, 55, 30)
@@ -1638,8 +1642,9 @@ class RoachRenderer:
 
         if self.alpha >= 1:
             local = self._compose_local(s, moving)
-            # 贴图本地头朝上；pygame.rotate 正角为逆时针，故取负号才能头朝行进方向
-            turn = -(self.heading + 90.0) + self.spin
+            # 贴图本地头朝上。pygame.rotate 正角=逆时针，故取反：
+            # turn = -(目标朝向 - 本地朝上) ，例如朝右 heading=0 → turn=-90（顺时针）
+            turn = -(self.heading - SPRITE_UPRIGHT_HEADING) + self.spin
             if abs(turn) > 0.05:
                 local = pygame.transform.rotate(local, turn)
 
