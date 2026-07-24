@@ -8,6 +8,9 @@
   "click_through_force": false,
   "follow_default": false,
   "global_hotkeys": true,
+  "accountant_buddy": true,
+  "buddy_banter_min": 120,
+  "buddy_banter_max": 280,
   "enabled_packs": [
     "worker",
     "finance",
@@ -19,6 +22,7 @@
     "overview": "<ctrl>+<alt>+/",
     "passthrough": "<ctrl>+<alt>+p",
     "quit": "<ctrl>+<alt>+q",
-    "status": "<ctrl>+<alt>+s"
+    "status": "<ctrl>+<alt>+s",
+    "banter": "<ctrl>+<alt>+b"
   }
 }

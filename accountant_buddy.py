@@ -108,8 +108,9 @@ class AccountantBuddy:
         self.active = True
         self._script: list[tuple[str, str]] = []
         self._busy_until = 0.0
-        self.roach.target_alpha = 70
-        self.roach.alpha = 70
+        # 平时完全隐藏，仅对喷时现身
+        self.roach.target_alpha = 0
+        self.roach.alpha = 0
         self.roach.heading = -45.0  # 大致朝向左侧主宠
         self.roach.set_facing(-1, 0)
 
@@ -117,11 +118,17 @@ class AccountantBuddy:
     def bantering(self) -> bool:
         return bool(self._script) or bool(self.bubbles.current) or bool(self.bubbles._q)
 
+    @property
+    def visible(self) -> bool:
+        """对喷中，或淡出尚未结束时需要占位。"""
+        return self.active and (self.bantering or self.roach.alpha > 4)
+
     def start_banter(self, script: list[tuple[str, str]] | None = None) -> None:
         script = list(script or random.choice(BANTER_SCRIPTS))
         self._script = script
         self.bubbles.clear()
         self.roach.target_alpha = 255
+        self.roach.alpha = max(self.roach.alpha, 40)  # 立刻看得见，再淡入满不透明
         self.roach.target_scale = 1.08
         self.fx_main("star", 3)
         # 立刻抛第一句
@@ -164,13 +171,13 @@ class AccountantBuddy:
                 else:
                     self._feed_next_line()
 
-        # 对喷时兴奋；平时半藏
+        # 对喷时兴奋现身；平时完全隐去
         if self.bantering:
             self.roach.target_alpha = 255
             self.roach.target_scale = 1.05 + 0.03 * math.sin(pygame.time.get_ticks() * 0.01)
             happy = True
         else:
-            self.roach.target_alpha = 90
+            self.roach.target_alpha = 0
             self.roach.target_scale = 0.95
             happy = False
 
@@ -178,11 +185,11 @@ class AccountantBuddy:
         self.roach.tick(False, 0.2, False, happy, dancing=self.bantering)
 
     def draw(self, canvas: pygame.Surface, pad_x: int, roach_y: int, pet_w: int) -> None:
-        if not self.active:
+        if not self.active or self.roach.alpha < 1:
             return
         ox = self.slot_x + pad_x
-        # 粒子锚点修正：burst 用了 0,0，改在 draw 前补一次可见特效即可
-        self.roach.draw(canvas, ox, roach_y, False, False)
+        # 允许淡出到完全透明（主宠 draw 默认保底 alpha=40）
+        self.roach.draw(canvas, ox, roach_y, False, False, min_alpha=0)
         self._draw_bubble(canvas, ox, pet_w)
 
     def _draw_bubble(self, canvas: pygame.Surface, ox: int, pet_w: int) -> None:

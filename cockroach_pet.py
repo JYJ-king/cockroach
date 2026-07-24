@@ -1606,32 +1606,43 @@ class RoachRenderer:
             local = pygame.transform.rotate(local, self.tilt * 0.35)
         return local
 
-    def draw(self, surf: pygame.Surface, ox: int, oy: int, moving: bool, sleeping: bool):
+    def draw(
+        self,
+        surf: pygame.Surface,
+        ox: int,
+        oy: int,
+        moving: bool,
+        sleeping: bool,
+        min_alpha: int = 40,
+    ):
         s = self.scale
         cx = ox + PET_W / 2
         cy = oy + PET_H / 2 + self.bob
 
-        local = self._compose_local(s, moving)
-        # 贴图本地头朝上；pygame.rotate 正角为逆时针，故取负号才能头朝行进方向
-        turn = -(self.heading + 90.0) + self.spin
-        if abs(turn) > 0.05:
-            local = pygame.transform.rotate(local, turn)
+        if self.alpha >= 1:
+            local = self._compose_local(s, moving)
+            # 贴图本地头朝上；pygame.rotate 正角为逆时针，故取负号才能头朝行进方向
+            turn = -(self.heading + 90.0) + self.spin
+            if abs(turn) > 0.05:
+                local = pygame.transform.rotate(local, turn)
 
-        if self.alpha < 250:
-            local = local.copy()
-            local.set_alpha(max(40, int(self.alpha)))
+            if self.alpha < 250:
+                local = local.copy()
+                local.set_alpha(max(min_alpha, int(self.alpha)))
 
-        rect = local.get_rect(center=(int(cx), int(cy)))
-        sh_w = int(min(rect.width, rect.height) * 0.7)
-        shad = pygame.Surface((max(8, sh_w), 8), pygame.SRCALPHA)
-        pygame.draw.ellipse(shad, (0, 0, 0, 50), shad.get_rect())
-        surf.blit(shad, (rect.centerx - shad.get_width() // 2, rect.bottom - 4))
-        surf.blit(local, rect)
+            rect = local.get_rect(center=(int(cx), int(cy)))
+            sh_a = max(0, min(50, int(50 * self.alpha / 255)))
+            if sh_a > 0:
+                sh_w = int(min(rect.width, rect.height) * 0.7)
+                shad = pygame.Surface((max(8, sh_w), 8), pygame.SRCALPHA)
+                pygame.draw.ellipse(shad, (0, 0, 0, sh_a), shad.get_rect())
+                surf.blit(shad, (rect.centerx - shad.get_width() // 2, rect.bottom - 4))
+            surf.blit(local, rect)
 
-        if sleeping:
-            veil = pygame.Surface((rect.width, max(4, rect.height // 4)), pygame.SRCALPHA)
-            veil.fill((80, 80, 120, 70))
-            surf.blit(veil, (rect.left, rect.top + 4))
+            if sleeping:
+                veil = pygame.Surface((rect.width, max(4, rect.height // 4)), pygame.SRCALPHA)
+                veil.fill((80, 80, 120, 70))
+                surf.blit(veil, (rect.left, rect.top + 4))
 
         for p in self.particles:
             a = max(0, min(255, p.life * 6))
@@ -2232,16 +2243,20 @@ class RoachPet:
         self._next_banter = time.time() + random.uniform(min(lo, hi), max(lo, hi))
 
     def _canvas_size(self) -> tuple[int, int]:
-        if self.buddy and self.buddy.active and self.settings.get("accountant_buddy", True):
+        # 仅对喷（含淡出）时加宽窗口，平时单宠
+        if self.buddy and self.buddy.visible and self.settings.get("accountant_buddy", True):
             return DUAL_WIN_W, WIN_H
         return WIN_W, WIN_H
 
     def _sync_layout(self):
         w, h = self._canvas_size()
-        if self.canvas.get_width() != w or self.canvas.get_height() != h:
+        size_changed = self.canvas.get_width() != w or self.canvas.get_height() != h
+        if size_changed:
             self.canvas = pygame.Surface((w, h), pygame.SRCALPHA)
         self.brain.pw = w
         self.brain.ph = h
+        if not size_changed:
+            return
         if IS_MAC and self.window is not None and self.view is not None:
             self.view.setFrame_(NSMakeRect(0, 0, w, h))
             self.window.setContentSize_((w, h))
@@ -2302,8 +2317,10 @@ class RoachPet:
                 self._init_buddy()
             else:
                 self.buddy.active = True
+                self.buddy.roach.target_alpha = 0
+                self.buddy.roach.alpha = 0
                 self._sync_layout()
-            self.say("会计蟑螂到岗", urgent=True)
+            self.say("会计蟑螂待命", urgent=True)
         else:
             if self.buddy:
                 self.buddy.active = False
@@ -3556,7 +3573,7 @@ class RoachPet:
 
         self._draw_bubble()
         self.roach.draw(self.canvas, PAD_X, ROACH_Y, moving, sleeping)
-        if self.buddy and self.buddy.active:
+        if self.buddy and self.buddy.visible:
             self.buddy.draw(self.canvas, PAD_X, ROACH_Y, PET_W)
 
         if sleeping:
@@ -3635,6 +3652,8 @@ class RoachPet:
         if self.buddy and self.buddy.active:
             main_busy = bool(self.bubbles.current or self.bubbles._q)
             self.buddy.tick(main_busy)
+            # 对喷结束淡出后收回双宠窗口宽度
+            self._sync_layout()
 
         if st == State.HAPPY:
             self.roach.target_scale = 1.0 + math.sin(pygame.time.get_ticks() * 0.015) * 0.06
