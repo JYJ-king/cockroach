@@ -138,6 +138,20 @@ class DesktopChrome:
         add("故事大会", "story")
         add("开关休息提醒", "toggle_rest")
         add("开关鼠标寻访", "toggle_mouse_seek")
+        menu.addItem_(NSMenuItem.separatorItem())
+        add("随机猫互动", "cat_random")
+        add("连喵", "cat_meow")
+        add("晒太阳", "cat_sun")
+        add("抓挠", "cat_scratch")
+        add("叼礼物", "cat_gift")
+        add("死盯", "cat_stare")
+        add("推桌", "cat_knock")
+        add("蹭头", "cat_headbutt")
+        add("颤叫观鸟", "cat_chirp")
+        add("傲娇无视", "cat_ignore")
+        add("踩奶", "cat_knead")
+        add("舔毛", "cat_groom")
+        menu.addItem_(NSMenuItem.separatorItem())
         add("开关 AI", "toggle_ai")
         add("切换 AI 厂商", "cycle_ai_provider")
         add("显示称号", "titles")
@@ -184,6 +198,20 @@ class DesktopChrome:
             pystray.MenuItem("故事大会", on("story")),
             pystray.MenuItem("开关休息提醒", on("toggle_rest")),
             pystray.MenuItem("开关鼠标寻访", on("toggle_mouse_seek")),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("随机猫互动", on("cat_random")),
+            pystray.MenuItem("连喵", on("cat_meow")),
+            pystray.MenuItem("晒太阳", on("cat_sun")),
+            pystray.MenuItem("抓挠", on("cat_scratch")),
+            pystray.MenuItem("叼礼物", on("cat_gift")),
+            pystray.MenuItem("死盯", on("cat_stare")),
+            pystray.MenuItem("推桌", on("cat_knock")),
+            pystray.MenuItem("蹭头", on("cat_headbutt")),
+            pystray.MenuItem("颤叫观鸟", on("cat_chirp")),
+            pystray.MenuItem("傲娇无视", on("cat_ignore")),
+            pystray.MenuItem("踩奶", on("cat_knead")),
+            pystray.MenuItem("舔毛", on("cat_groom")),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("开关 AI", on("toggle_ai")),
             pystray.MenuItem("切换 AI 厂商", on("cycle_ai_provider")),
             pystray.MenuItem("显示称号", on("titles")),

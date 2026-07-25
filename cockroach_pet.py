@@ -1359,6 +1359,15 @@ class Bubble:
     POUNCE_PHRASES = ["扑击!", "锁定目标", "起飞!", "逮到你!", "暗杀猫"]
     BOX_PHRASES = ["纸箱是家", "钻进去!", "外面消失了", "喵窝+1", "别拆快递"]
     YARN_PHRASES = ["毛线球!", "缠住了", "再滚一下", "玩不够", "线头在哪"]
+    MEOW_PHRASES = ["喵!", "喵喵!", "喵呜~", "miao~", "大声点喵!"]
+    SUN_PHRASES = ["晒太阳...", "暖乎乎", "禁止打扰", "光斑是我的", "融化中"]
+    SCRATCH_PHRASES = ["抓抓抓!", "沙发危!", "磨爪子", "屏幕边缘香", "咔咔~"]
+    GIFT_PHRASES = ["给你的!", "我叼来了", "神秘礼物", "别嫌弃哦", "爱心投喂"]
+    STARE_PHRASES = ["盯...", "看你干嘛", "眨眼挑战", "你先看破", "灵魂锁定"]
+    KNOCK_PHRASES = ["推下去!", "手滑喵", "桌面清理", "重力实验", "杯杯再见"]
+    HEADBUTT_PHRASES = ["蹭蹭!", "头槌爱意", "气味标记", "你是我的", "呼噜蹭"]
+    CHIRP_PHRASES = ["叽!?", "鸟!!", "窗户那边", "颤叫中", "猎手本能"]
+    IGNORE_PHRASES = ["看不见你", "傲娇中", "再叫也不理", "面壁思考", "冷漠.jpg"]
 
     def __init__(self, text: str | None = None, life: int = 140):
         self.text = text or random.choice(self.PHRASES)
@@ -2710,6 +2719,30 @@ class RoachPet:
             self.toggle_idle_showcase()
         elif cmd == "toggle_mouse_seek":
             self.toggle_mouse_seek()
+        elif cmd == "cat_random":
+            self.do_cat_random()
+        elif cmd == "cat_meow":
+            self.do_meow()
+        elif cmd == "cat_sun":
+            self.do_sunbathe()
+        elif cmd == "cat_scratch":
+            self.do_scratch()
+        elif cmd == "cat_gift":
+            self.do_gift()
+        elif cmd == "cat_stare":
+            self.do_stare()
+        elif cmd == "cat_knock":
+            self.do_knock()
+        elif cmd == "cat_headbutt":
+            self.do_headbutt()
+        elif cmd == "cat_chirp":
+            self.do_chirp()
+        elif cmd == "cat_ignore":
+            self.do_ignore()
+        elif cmd == "cat_knead":
+            self.do_knead()
+        elif cmd == "cat_groom":
+            self.do_groom()
         elif cmd == "toggle_ai":
             self.toggle_ai()
         elif cmd == "cycle_ai_provider":
@@ -3217,10 +3250,11 @@ class RoachPet:
         self.bubbles.push_many([
             "上头摸·下身逗·双击跑·连摸踩奶",
             "N纸箱 C回窝 E打猎 Q观鸟 Z跑酷",
-            "U露肚皮 L激光 V炸毛 X扑击",
-            "K召唤 M跟随 T故事 I闲聊 H帮助",
-            "G打工 J黑话 ,对喷 .开关会计猫",
-            "Ctrl+Alt+R召唤 P穿透 A开AI",
+            "U露肚 L激光 V炸毛 X扑击 K召唤",
+            "⌥M连喵 ⌥S晒太阳 ⌥R抓挠 ⌥G送礼",
+            "⌥T死盯 ⌥N推桌 ⌥H蹭头 ⌥C颤叫 ⌥I傲娇",
+            "⌥K踩奶 ⌥B舔毛 · 菜单也可点猫咪互动",
+            "H帮助 T故事 ,对喷 · Ctrl+Alt+R召唤",
         ], life=150)
 
     def _check_sys_alerts(self):
@@ -3405,21 +3439,32 @@ class RoachPet:
                 return
             self.roach.target_alpha = 255
             act = random.random()
-            if act < 0.22:
+            if act < 0.14:
                 self.brain.react_peek()
-            elif act < 0.42:
+            elif act < 0.26:
                 self.do_groom()
                 self.say(text, life=120)
                 return
-            elif act < 0.62:
+            elif act < 0.38:
+                self.do_meow()
+                return
+            elif act < 0.48:
+                self.do_sunbathe()
+                return
+            elif act < 0.58:
+                self.do_stare()
+                return
+            elif act < 0.68:
+                self.do_headbutt()
+                return
+            elif act < 0.78:
                 self.brain.react_pose()
-            elif act < 0.80:
+            elif act < 0.88:
                 self.brain.react_dance()
                 self.fx("star", 4)
             else:
-                self.brain.react_spin(12)
-                self.roach.spin_vel = 12
-                self.fx("dust", 3)
+                self.do_scratch()
+                return
             self.say(text, life=120)
 
         if self._ai_available() and not self._ai_busy and random.random() < 0.45:
@@ -3579,6 +3624,8 @@ class RoachPet:
         acts = (
             "wave", "knead", "dance", "groom", "chat",
             "laser", "yarn", "peek", "pose", "stretch",
+            "meow", "sun", "scratch", "gift", "stare",
+            "knock", "headbutt", "chirp", "ignore",
         )
         self._seek_act = random.choice(acts)
         self.roach.target_alpha = 255
@@ -3644,6 +3691,24 @@ class RoachPet:
             self.say(random.choice(["在干嘛?", "发呆呢?", "看你屏幕~"]), urgent=True, life=110)
         elif act == "pose":
             self.do_pose()
+        elif act == "meow":
+            self.do_meow()
+        elif act == "sun":
+            self.do_sunbathe()
+        elif act == "scratch":
+            self.do_scratch()
+        elif act == "gift":
+            self.do_gift()
+        elif act == "stare":
+            self.do_stare()
+        elif act == "knock":
+            self.do_knock()
+        elif act == "headbutt":
+            self.do_headbutt()
+        elif act == "chirp":
+            self.do_chirp()
+        elif act == "ignore":
+            self.do_ignore()
         else:  # stretch
             self.brain.react_dance()
             self.roach.force_anim("waving", 5.0)
@@ -3825,6 +3890,131 @@ class RoachPet:
         self.say(random.choice(Bubble.BOX_PHRASES), urgent=True, life=110)
         self.brain.go_hide(scramble=True)
         self.roach.force_anim("waiting", 5.0)
+
+    def do_meow(self):
+        """连喵三声。"""
+        self.brain._set(State.GREET, 110)
+        self.roach.belly = False
+        self.roach.force_anim("waving", 4.0)
+        self.fx("star", 4)
+        lines = random.sample(Bubble.MEOW_PHRASES, k=min(3, len(Bubble.MEOW_PHRASES)))
+        self.bubbles.clear()
+        self.bubbles.push_many(lines, life=90)
+
+    def do_sunbathe(self):
+        """晒太阳：趴光斑上。"""
+        self.roach.belly = False
+        self.brain._set(State.POSE, 180)
+        self.roach.force_anim("waiting", 8.0)
+        self.roach.target_scale = 1.08
+        self.fx("star", 6)
+        self.say(random.choice(Bubble.SUN_PHRASES), urgent=True, life=140)
+
+    def do_scratch(self):
+        """抓挠沙发 / 屏幕边。"""
+        self.roach.belly = False
+        self.brain._set(State.ZOOMIE, 70)
+        self.brain._pick_target()
+        self.roach.anim_override = None
+        self.fx("dust", 8)
+        self.say(random.choice(Bubble.SCRATCH_PHRASES), urgent=True, life=110)
+
+    def do_gift(self):
+        """叼来神秘礼物。"""
+        self.brain._set(State.HAPPY, 120)
+        self.roach.belly = False
+        self.roach.force_anim("waving", 4.0)
+        self.fx("heart", 10)
+        self.fx("crumb", 6)
+        self.brain.affection += 1
+        self.say(random.choice(Bubble.GIFT_PHRASES), urgent=True, life=130)
+
+    def do_stare(self):
+        """死盯铲屎官。"""
+        self.brain._set(State.CURIOUS, 160)
+        self.roach.belly = False
+        self.roach.force_anim("waiting", 6.0)
+        self.fx("star", 2)
+        self.bubbles.clear()
+        self.bubbles.push_many(
+            [
+                random.choice(Bubble.STARE_PHRASES),
+                "...",
+                random.choice(["你先眨眼", "我赢了", "继续盯"]),
+            ],
+            life=100,
+        )
+
+    def do_knock(self):
+        """把桌上东西推下去。"""
+        self.roach.belly = False
+        self.brain.react_spin(14)
+        self.roach.spin_vel = 10
+        self.fx("dust", 10)
+        self.fx("crumb", 8)
+        self.say(random.choice(Bubble.KNOCK_PHRASES), urgent=True, life=120)
+        self.brain._set(State.HAPPY, 80)
+
+    def do_headbutt(self):
+        """蹭头 / 头槌示爱。"""
+        self.brain.react_click()
+        self.roach.belly = False
+        self.roach.target_scale = 1.12
+        self.roach.force_anim("waving", 3.5)
+        self.fx("heart", 8)
+        self._note_progress(pet_count=1)
+        self.say(random.choice(Bubble.HEADBUTT_PHRASES), urgent=True, life=120)
+
+    def do_chirp(self):
+        """看见鸟/窗外颤叫。"""
+        self.brain.react_peek()
+        self.roach.belly = False
+        self.roach.force_anim("waiting", 4.0)
+        self.fx("star", 5)
+        self.say(random.choice(Bubble.CHIRP_PHRASES), urgent=True, life=120)
+
+    def do_ignore(self):
+        """傲娇无视。"""
+        self.roach.belly = False
+        self.brain.go_hide(scramble=False)
+        self.roach.force_anim("idle", 5.0)
+        self.fx("dust", 2)
+        self.say(random.choice(Bubble.IGNORE_PHRASES), urgent=True, life=120)
+
+    def do_cat_random(self):
+        """随机来一段猫咪专属互动。"""
+        acts = (
+            self.do_meow, self.do_sunbathe, self.do_scratch, self.do_gift,
+            self.do_stare, self.do_knock, self.do_headbutt, self.do_chirp,
+            self.do_ignore, self.do_knead, self.do_groom, self.do_box,
+            self.do_yarn, self.do_loaf,
+        )
+        random.choice(acts)()
+
+    def _cat_hotkey(self, chars: str) -> bool:
+        """Alt/⌥ + 字母：猫咪专属快捷键。返回是否已处理。"""
+        cat_map = {
+            "m": self.do_meow,
+            "s": self.do_sunbathe,
+            "r": self.do_scratch,
+            "g": self.do_gift,
+            "t": self.do_stare,
+            "n": self.do_knock,
+            "h": self.do_headbutt,
+            "c": self.do_chirp,
+            "i": self.do_ignore,
+            "k": self.do_knead,
+            "b": self.do_groom,
+            "y": self.do_yarn,
+            "l": self.do_loaf,
+            "p": self.do_pounce,
+            "a": self.do_cat_random,
+        }
+        fn = cat_map.get(chars)
+        if fn:
+            fn()
+            return True
+        return False
 
     # ── 坐标换算 ──────────────────────────────────────────
 
@@ -4211,6 +4401,14 @@ class RoachPet:
             return False
 
         chars = (event.charactersIgnoringModifiers() or "").lower()
+        # Alt/⌥ + 字母：猫咪专属互动
+        try:
+            flags = int(event.modifierFlags())
+            option = bool(flags & (1 << 19))
+        except Exception:
+            option = False
+        if option and chars and self._cat_hotkey(chars):
+            return False
         if chars == "d":
             self.say_date()
         elif chars == "t":
@@ -4489,7 +4687,9 @@ class RoachPet:
         print("寻访: 鼠标约30分钟不动会跑来找你互动 | 菜单可开关")
         print("AI: Ctrl+Alt+A开关 | 菜单切换厂商(deepseek/doubao/qwen) | secrets.json填Key")
         print("猫咪: N纸箱 C回窝 E打猎/毛线 Q观鸟 Z跑酷 V炸毛 O摆拍 X扑击")
-        print("      U露肚 L激光 K召唤 M跟随 I闲聊 · 周期表演会舔毛")
+        print("      U露肚 L激光 K召唤 M跟随 · Alt/⌥+字母专属猫互动:")
+        print("      ⌥M连喵 ⌥S晒太阳 ⌥R抓挠 ⌥G送礼 ⌥T死盯 ⌥N推桌")
+        print("      ⌥H蹭头 ⌥C颤叫 ⌥I傲娇 ⌥K踩奶 ⌥B舔毛 ⌥A随机猫互动")
         print("      -穿透 =皮肤 D日期 T故事 W天气 S状态 H帮助 Esc退出")
         print("      报时: 中键点小猫 或 菜单状态")
 
@@ -4595,6 +4795,9 @@ class RoachPet:
             chars = chr(ev.key)
         if not chars and pygame.K_0 <= ev.key <= pygame.K_9:
             chars = chr(ev.key)
+        # Alt + 字母：猫咪专属
+        if (pygame.key.get_mods() & pygame.KMOD_ALT) and chars and self._cat_hotkey(chars):
+            return False
         # 复用 mac 字符分支：构造伪 NS key 事件太重，直接复制映射
         mapping = {
             "d": self.say_date,
