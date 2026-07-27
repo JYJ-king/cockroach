@@ -167,8 +167,8 @@ class DesktopChrome:
         try:
             import pystray
             from PIL import Image, ImageDraw
-        except ImportError:
-            print("⚠️ 托盘需要: pip install pystray pillow")
+        except ImportError as exc:
+            print(f"⚠️ 托盘需要: pip install pystray pillow ({exc})")
             return
 
         # 简易图标
@@ -179,7 +179,9 @@ class DesktopChrome:
         draw.ellipse((32, 10, 44, 22), fill=(60, 40, 30, 255))
 
         def on(cmd: str):
-            return lambda _icon, _item: self._emit(cmd)
+            def _handler(_icon=None, _item=None):
+                self._emit(cmd)
+            return _handler
 
         menu = pystray.Menu(
             pystray.MenuItem("召唤过来", on("call")),
@@ -221,5 +223,9 @@ class DesktopChrome:
         )
         icon = pystray.Icon("cockroach_pet", img, "小猫桌宠", menu)
         self._tray_icon = icon
-        print("系统托盘: 右键小猫图标")
-        icon.run()
+        print("系统托盘: 右键任务栏旁小猫图标（若在隐藏区点 ^ 展开）")
+        try:
+            icon.run()
+        except Exception as exc:
+            print(f"⚠️ 托盘运行失败: {exc}")
+            self._tray_icon = None

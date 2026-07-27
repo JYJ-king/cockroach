@@ -15,6 +15,18 @@ from enum import Enum, auto
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
 
+# Windows：在创建窗口前声明 DPI 感知，避免 125%/150% 缩放下点击错位、窗体偏移
+if IS_WIN:
+    try:
+        import ctypes as _ctypes_dpi
+
+        try:
+            _ctypes_dpi.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE
+        except Exception:
+            _ctypes_dpi.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 # macOS 用 AppKit 窗口时，禁止 SDL 抢窗口；Windows 需要真实 pygame 窗口
 if IS_MAC:
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -1274,6 +1286,13 @@ def get_desktop_size() -> tuple[int, int]:
         try:
             import ctypes
             user32 = ctypes.windll.user32
+            # 虚拟桌面（多屏总宽高）；单屏时与主屏一致
+            SM_CXVIRTUALSCREEN = 78
+            SM_CYVIRTUALSCREEN = 79
+            vw = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+            vh = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+            if vw > 0 and vh > 0:
+                return vw, vh
             return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
         except Exception:
             pass
@@ -2503,7 +2522,8 @@ class RoachPet:
         )
         user32.SetLayeredWindowAttributes(self.hwnd, 0x00FF00FF, 0, LWA_COLORKEY)
         self.x, self.y = float(old[0]), float(old[1])
-        self._win_click_through = False
+        self._win_click_through = True  # 强制刷新样式
+        self._win_set_click_through(False)
         self._win_apply_pos()
 
     def do_banter(self):
@@ -2611,6 +2631,9 @@ class RoachPet:
             style | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         )
         user32.SetLayeredWindowAttributes(self.hwnd, 0x00FF00FF, 0, LWA_COLORKEY)
+        # 清掉可能残留的 TRANSPARENT，并强制刷新样式
+        self._win_click_through = True  # 强制走一遍 set(False)
+        self._win_set_click_through(False)
         self._win_apply_pos()
 
     def _win_apply_pos(self):
@@ -2619,13 +2642,45 @@ class RoachPet:
         import ctypes
         user32 = ctypes.windll.user32
         HWND_TOPMOST = -1
+        SW_SHOWNOACTIVATE = 4
         SWP_NOSIZE = 0x0001
         SWP_NOACTIVATE = 0x0010
         SWP_SHOWWINDOW = 0x0040
+        # 「显示桌面」/ Win+D 会把置顶窗一并最小化；每帧拉回，保持始终在桌面上
+        if user32.IsIconic(self.hwnd):
+            user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
         user32.SetWindowPos(
             self.hwnd, HWND_TOPMOST, int(self.x), int(self.y), 0, 0,
             SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )
+
+    def _win_focus_for_input(self):
+        """点击小猫后抢焦点，否则 Windows 下快捷键全部无效。"""
+        if not self.hwnd:
+            return
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = int(self.hwnd)
+        try:
+            if user32.GetForegroundWindow() == hwnd:
+                return
+            fg = user32.GetForegroundWindow()
+            tid_fg = user32.GetWindowThreadProcessId(fg, None)
+            tid_self = user32.GetWindowThreadProcessId(hwnd, None)
+            attached = False
+            if tid_fg and tid_self and tid_fg != tid_self:
+                attached = bool(user32.AttachThreadInput(tid_fg, tid_self, True))
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+            user32.SetFocus(hwnd)
+            if attached:
+                user32.AttachThreadInput(tid_fg, tid_self, False)
+        except Exception:
+            try:
+                user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
 
     def stop(self):
         self._persist()
@@ -4016,6 +4071,103 @@ class RoachPet:
             return True
         return False
 
+    def _pygame_key_char(self, ev) -> str:
+        """Windows：优先用物理键位，避免 Alt/输入法导致 unicode 为空或错码。"""
+        key = ev.key
+        if pygame.K_a <= key <= pygame.K_z:
+            return chr(key)
+        if pygame.K_0 <= key <= pygame.K_9:
+            return chr(key)
+        punct = {
+            pygame.K_SEMICOLON: ";",
+            pygame.K_SLASH: "/",
+            pygame.K_LEFTBRACKET: "[",
+            pygame.K_RIGHTBRACKET: "]",
+            pygame.K_BACKSLASH: "\\",
+            pygame.K_QUOTE: "'",
+            pygame.K_COMMA: ",",
+            pygame.K_PERIOD: ".",
+            pygame.K_MINUS: "-",
+            pygame.K_EQUALS: "=",
+        }
+        if key in punct:
+            return punct[key]
+        # 小键盘数字
+        if pygame.K_KP0 <= key <= pygame.K_KP9:
+            return chr(ord("0") + (key - pygame.K_KP0))
+        ch = (ev.unicode or "").lower()
+        return ch[:1] if ch else ""
+
+    def _dispatch_char_key(self, chars: str) -> None:
+        """Mac/Windows 共用的字符快捷键（不含修饰键专属猫互动）。"""
+        if not chars:
+            return
+        if chars == "p":
+            self.brain.react_poke()
+            self.fx("dust", 5)
+            self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.35)
+            return
+        if chars == "r":
+            self.brain.react_dblclick()
+            self.fx("star", 4)
+            self.maybe_say(random.choice(["冲!", "开跑!", "喵闪!"]), chance=0.25)
+            return
+        if chars == "n":
+            self.do_box()
+            return
+        if chars == ",":
+            self.do_banter()
+            return
+        if chars == ".":
+            self.toggle_buddy()
+            return
+        mapping = {
+            "d": self.say_date,
+            "t": self.do_story,
+            "w": self.say_weather,
+            "s": self.say_status,
+            "f": self.do_feed,
+            "a": self.do_dance,
+            "m": self.do_follow_toggle,
+            "c": self.do_hide,
+            "b": self.do_home,
+            "u": self.do_belly,
+            "l": self.do_laser,
+            "g": self.say_worker_tip,
+            "j": self.say_buzzword,
+            "y": self.do_align,
+            "1": self.do_standup,
+            "2": self.do_review,
+            "3": self.do_fish,
+            "4": self.do_resist_pua,
+            "5": self.say_finance_buzz,
+            "6": self.do_month_close,
+            "7": self.do_audit_panic,
+            "8": self.do_reimburse,
+            "9": self.do_tax_check,
+            "0": self.do_payroll_day,
+            ";": self.say_finance_tip,
+            "/": self.say_sys_overview,
+            "[": self.say_sys_cpu,
+            "]": self.say_sys_mem,
+            "\\": self.say_sys_disk,
+            "'": self.say_sys_net,
+            "h": self.say_help,
+            "-": self.toggle_click_through,
+            "=": self.cycle_skin,
+            "q": self.do_peek,
+            "e": self.do_forage,
+            "z": self.do_zoomie,
+            "k": self.do_call,
+            "v": self.do_panic,
+            "o": self.do_pose,
+            "i": self.do_chat,
+            "x": self.do_spar,
+        }
+        fn = mapping.get(chars)
+        if fn:
+            fn()
+
     # ── 坐标换算 ──────────────────────────────────────────
 
     def _sh(self) -> int:
@@ -4073,7 +4225,9 @@ class RoachPet:
             self.window.setIgnoresMouseEvents_(not over)
             return
         if IS_WIN and self.hwnd:
-            self._win_set_click_through(not over)
+            # Windows 用颜色键透明：品红像素本就可点穿，无需 WS_EX_TRANSPARENT。
+            # 旧逻辑来回切换 TRANSPARENT 且未 FRAMECHANGED，会导致整窗永久点不中。
+            self._win_set_click_through(False)
 
     def _win_set_click_through(self, enabled: bool):
         if enabled == self._win_click_through:
@@ -4082,18 +4236,30 @@ class RoachPet:
         user32 = ctypes.windll.user32
         GWL_EXSTYLE = -20
         WS_EX_TRANSPARENT = 0x00000020
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
         style = user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
         if enabled:
             style |= WS_EX_TRANSPARENT
         else:
             style &= ~WS_EX_TRANSPARENT
         user32.SetWindowLongW(self.hwnd, GWL_EXSTYLE, style)
+        # 必须 FRAMECHANGED，否则样式切换不生效（互动全废的常见原因）
+        user32.SetWindowPos(
+            self.hwnd, 0, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
         self._win_click_through = enabled
 
     # ── 鼠标 ──────────────────────────────────────────────
 
     def _modifiers(self, event) -> tuple[bool, bool, bool, bool]:
-        """返回 (option/alt, shift, control, command/meta)。"""
+        """返回 (alt/option, shift, control, meta)。
+        meta: Mac=⌘，Windows=Win。
+        """
         if IS_WIN or getattr(event, "_is_pygame", False):
             mods = pygame.key.get_mods()
             return (
@@ -4109,10 +4275,40 @@ class RoachPet:
         command = bool(flags & (1 << 20))
         return option, shift, control, command
 
+    def _mouse_mod_actions(self, alt: bool, shift: bool, control: bool, meta: bool) -> bool:
+        """点击修饰键：操作语义跨平台一致，键位按平台。
+        Mac: ⌘召唤  Ctrl大餐  ⌥喂食  Shift跳舞
+        Win: Ctrl+Shift召唤（Win 键常被系统吞） Ctrl大餐  Alt喂食  Shift跳舞
+        """
+        if IS_MAC:
+            if meta:
+                self.do_call()
+                return True
+            if control:
+                self.do_feed(feast=True)
+                return True
+        else:
+            # Windows：优先 Ctrl+Shift / Win 召唤，避免纯 Win+点击被开始菜单截走
+            if meta or (control and shift):
+                self.do_call()
+                return True
+            if control:
+                self.do_feed(feast=True)
+                return True
+        if alt:
+            self.do_feed()
+            return True
+        if shift:
+            self.do_dance()
+            return True
+        return False
+
     def on_mouse_down(self, event):
         mx, my = self._event_local(event)
         if not self._hit(mx, my):
             return
+        if IS_WIN:
+            self._win_focus_for_input()
 
         # 睡觉时单击叫醒，稍后仍会回窝趴着
         if self.brain.state == State.SLEEP:
@@ -4150,18 +4346,8 @@ class RoachPet:
             self.fx("heart", 4)
             return
 
-        option, shift, control, command = self._modifiers(event)
-        if command:
-            self.do_call()
-            return
-        if control:
-            self.do_feed(feast=True)
-            return
-        if option:
-            self.do_feed()
-            return
-        if shift:
-            self.do_dance()
+        alt, shift, control, meta = self._modifiers(event)
+        if self._mouse_mod_actions(alt, shift, control, meta):
             return
 
         now = pygame.time.get_ticks()
@@ -4296,6 +4482,8 @@ class RoachPet:
         mx, my = self._event_local(event)
         if not self._hit(mx, my):
             return
+        if IS_WIN:
+            self._win_focus_for_input()
         if self.brain.state == State.SLEEP:
             self.brain.go_hide()
             self.fx("star", 3)
@@ -4401,110 +4589,17 @@ class RoachPet:
             return False
 
         chars = (event.charactersIgnoringModifiers() or "").lower()
-        # Alt/⌥ + 字母：猫咪专属互动
+        # ⌥ + 字母：仅猫咪专属，不再落入普通快捷键
         try:
             flags = int(event.modifierFlags())
             option = bool(flags & (1 << 19))
         except Exception:
             option = False
-        if option and chars and self._cat_hotkey(chars):
+        if option:
+            if chars:
+                self._cat_hotkey(chars)
             return False
-        if chars == "d":
-            self.say_date()
-        elif chars == "t":
-            self.do_story()
-        elif chars == "w":
-            self.say_weather()
-        elif chars == "s":
-            self.say_status()
-        elif chars == "f":
-            self.do_feed()
-        elif chars == "p":
-            self.brain.react_poke()
-            self.fx("dust", 5)
-            self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.35)
-        elif chars == "a":
-            self.do_dance()
-        elif chars == "m":
-            self.do_follow_toggle()
-        elif chars == "c":
-            self.do_hide()
-        elif chars == "b":
-            self.do_home()
-        elif chars == "u":
-            self.do_belly()
-        elif chars == "l":
-            self.do_laser()
-        elif chars == "g":
-            self.say_worker_tip()
-        elif chars == "j":
-            self.say_buzzword()
-        elif chars == "y":
-            self.do_align()
-        elif chars == "1":
-            self.do_standup()
-        elif chars == "2":
-            self.do_review()
-        elif chars == "3":
-            self.do_fish()
-        elif chars == "4":
-            self.do_resist_pua()
-        elif chars == "5":
-            self.say_finance_buzz()
-        elif chars == "6":
-            self.do_month_close()
-        elif chars == "7":
-            self.do_audit_panic()
-        elif chars == "8":
-            self.do_reimburse()
-        elif chars == "9":
-            self.do_tax_check()
-        elif chars == "0":
-            self.do_payroll_day()
-        elif chars == ";":
-            self.say_finance_tip()
-        elif chars == "/":
-            self.say_sys_overview()
-        elif chars == "[":
-            self.say_sys_cpu()
-        elif chars == "]":
-            self.say_sys_mem()
-        elif chars == "\\":
-            self.say_sys_disk()
-        elif chars == "'":
-            self.say_sys_net()
-        elif chars == "h":
-            self.say_help()
-        elif chars == "-":
-            self.toggle_click_through()
-        elif chars == "=":
-            self.cycle_skin()
-        elif chars == "r":
-            self.brain.react_dblclick()
-            self.fx("star", 4)
-            self.maybe_say(random.choice(["冲!", "开跑!", "喵闪!"]), chance=0.25)
-        elif chars == "q":
-            self.do_peek()
-        elif chars == "e":
-            self.do_forage()
-        elif chars == "z":
-            self.do_zoomie()
-        elif chars == "k":
-            self.do_call()
-        elif chars == "v":
-            self.do_panic()
-        elif chars == "o":
-            self.do_pose()
-        elif chars == "i":
-            self.do_chat()
-        elif chars == "x":
-            self.do_spar()
-        elif chars == "n":
-            self.do_box()
-        elif chars == ",":
-            self.do_banter()
-        elif chars == ".":
-            self.toggle_buddy()
+        self._dispatch_char_key(chars)
         return False
 
     # ── 渲染 ──────────────────────────────────────────────
@@ -4676,21 +4771,24 @@ class RoachPet:
     def _print_help_banner(self):
         print("习性: 平时角落趴窝，互动才跑出来；鼠标凑近会换窝")
         print("产品: 菜单栏/托盘 | Ctrl+Alt+R召唤 /总览 P穿透 S状态 Q退出")
+        if IS_WIN:
+            print("Windows: 先点小猫再按快捷键 | 托盘在任务栏右下(可能在 ^ 里) | 显示桌面后会自动回来")
+            print("点击修饰: Ctrl+Shift+点=召唤 | Ctrl+点=大餐 | Alt+点=喂食 | Shift+点=跳舞")
+            print("猫咪专属: Alt+字母 (M连喵 S晒太阳 R抓挠 G送礼 T死盯 N推桌 … A随机)")
+        else:
+            print("点击修饰: ⌘点=召唤 | Ctrl点=大餐 | ⌥点=喂食 | Shift点=跳舞")
+            print("猫咪专属: ⌥+字母 (M连喵 S晒太阳 R抓挠 G送礼 T死盯 N推桌 … A随机)")
         print("设置: settings.json（气泡/提醒/穿透/话术包/皮肤）")
         print("打工: G提醒 J黑话混 Y对齐 | 1站会 2复盘 3摸鱼 4反PUA")
         print("监控: /总览  [CPU  ]内存  \\磁盘  '网络  (需 psutil)")
         print("财务: 5行话口头禅 6月结 7审计 8报销 9税务 0发薪 ;财务提醒")
-        print("互动: 上头摸/下身逗 | 双击跑 | 连摸踩奶 | ⌘/Win召唤 Ctrl大餐 | 滚轮转")
-        print("      Alt喂食 Shift跳舞 | 右键睡 | 中键日期 | 方向键/空格")
+        print("互动: 上头摸/下身逗 | 双击跑 | 连摸踩奶 | 滚轮转 | 右键睡 | 中键日期 | 方向键/空格")
         print("双宠: ,对喷  .开关会计猫 | Ctrl+Alt+B对喷")
         print("故事: T / Ctrl+Alt+T 故事大会 | 菜单开关休息提醒(约每小时)")
         print("寻访: 鼠标约30分钟不动会跑来找你互动 | 菜单可开关")
         print("AI: Ctrl+Alt+A开关 | 菜单切换厂商(deepseek/doubao/qwen) | secrets.json填Key")
         print("猫咪: N纸箱 C回窝 E打猎/毛线 Q观鸟 Z跑酷 V炸毛 O摆拍 X扑击")
-        print("      U露肚 L激光 K召唤 M跟随 · Alt/⌥+字母专属猫互动:")
-        print("      ⌥M连喵 ⌥S晒太阳 ⌥R抓挠 ⌥G送礼 ⌥T死盯 ⌥N推桌")
-        print("      ⌥H蹭头 ⌥C颤叫 ⌥I傲娇 ⌥K踩奶 ⌥B舔毛 ⌥A随机猫互动")
-        print("      -穿透 =皮肤 D日期 T故事 W天气 S状态 H帮助 Esc退出")
+        print("      U露肚 L激光 K召唤 M跟随 | -穿透 =皮肤 D日期 W天气 S状态 H帮助 Esc退出")
         print("      报时: 中键点小猫 或 菜单状态")
 
     def run(self):
@@ -4790,74 +4888,15 @@ class RoachPet:
             self.fx("star", 4)
             return False
 
-        chars = (ev.unicode or "").lower()
-        if not chars and pygame.K_a <= ev.key <= pygame.K_z:
-            chars = chr(ev.key)
-        if not chars and pygame.K_0 <= ev.key <= pygame.K_9:
-            chars = chr(ev.key)
-        # Alt + 字母：猫咪专属
-        if (pygame.key.get_mods() & pygame.KMOD_ALT) and chars and self._cat_hotkey(chars):
+        chars = self._pygame_key_char(ev)
+        mods = pygame.key.get_mods()
+        # Alt + 字母：仅猫咪专属（用物理键位，不依赖 unicode）
+        if mods & pygame.KMOD_ALT:
+            if chars:
+                self._cat_hotkey(chars)
             return False
-        # 复用 mac 字符分支：构造伪 NS key 事件太重，直接复制映射
-        mapping = {
-            "d": self.say_date,
-            "t": self.do_story,
-            "w": self.say_weather,
-            "s": self.say_status,
-            "f": self.do_feed,
-            "a": self.do_dance,
-            "m": self.do_follow_toggle,
-            "c": self.do_hide,
-            "b": self.do_home,
-            "u": self.do_belly,
-            "l": self.do_laser,
-            "g": self.say_worker_tip,
-            "j": self.say_buzzword,
-            "y": self.do_align,
-            "1": self.do_standup,
-            "2": self.do_review,
-            "3": self.do_fish,
-            "4": self.do_resist_pua,
-            "5": self.say_finance_buzz,
-            "6": self.do_month_close,
-            "7": self.do_audit_panic,
-            "8": self.do_reimburse,
-            "9": self.do_tax_check,
-            "0": self.do_payroll_day,
-            ";": self.say_finance_tip,
-            "/": self.say_sys_overview,
-            "[": self.say_sys_cpu,
-            "]": self.say_sys_mem,
-            "\\": self.say_sys_disk,
-            "'": self.say_sys_net,
-            "h": self.say_help,
-            "-": self.toggle_click_through,
-            "=": self.cycle_skin,
-            "q": self.do_peek,
-            "e": self.do_forage,
-            "z": self.do_zoomie,
-            "k": self.do_call,
-            "v": self.do_panic,
-            "o": self.do_pose,
-            "i": self.do_chat,
-            "x": self.do_spar,
-        }
-        if chars == "p":
-            self.brain.react_poke()
-            self.fx("dust", 5)
-            self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.35)
-        elif chars == "r":
-            self.brain.react_dblclick()
-            self.fx("star", 4)
-            self.maybe_say(random.choice(["冲!", "开跑!", "喵闪!"]), chance=0.25)
-        elif chars == "n":
-            self.do_box()
-        elif chars == ",":
-            self.do_banter()
-        elif chars == ".":
-            self.toggle_buddy()
-        elif chars in mapping:
-            mapping[chars]()
+        # Ctrl/Win 组合交给全局热键；焦点内单键走统一表
+        self._dispatch_char_key(chars)
         return False
 
 

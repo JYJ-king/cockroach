@@ -69,4 +69,6 @@ build_win.bat
 
 常用：`H` 帮助 · `N` 纸箱 · `C` 回窝 · `T` 故事 · `-` 穿透 · `=` 皮肤 · `G`/`J` 打工 · `/` 监控总览 · `Esc` 退出。
 
+点击修饰：Mac `⌘`召唤 / Windows `Ctrl+Shift`召唤；两边都是 `Ctrl`大餐、`⌥/Alt`喂食、`Shift`跳舞。猫咪专属：Mac `⌥+字母` / Windows `Alt+字母`。
+
 详见 **[操作说明.md](操作说明.md)**。
