@@ -2549,6 +2549,9 @@ class RoachPet:
         self._chrome = None
         self.buddy = None
         self._next_banter = time.time() + random.uniform(90, 160)
+        # Windows：快捷键不依赖窗口焦点（鼠标在猫上 / 刚点过即可）
+        self._pointer_over_pet = False
+        self._win_keys_until = 0.0
 
         if IS_MAC:
             if not OBJC_OK:
@@ -2560,7 +2563,11 @@ class RoachPet:
             raise RuntimeError(f"暂不支持平台: {sys.platform}")
 
         self._init_buddy()
-        self._chrome = DesktopChrome(self._cmd_q.put, self.settings)
+        self._chrome = DesktopChrome(
+            self._cmd_q.put,
+            self.settings,
+            win_keys_active=self._win_keys_active if IS_WIN else None,
+        )
         self._chrome.start()
         self._start_weather_fetch()
         self._queue_startup_greetings()
@@ -2915,6 +2922,53 @@ class RoachPet:
             self.toggle_ai()
         elif cmd == "cycle_ai_provider":
             self.cycle_ai_provider()
+        elif cmd.startswith("key") or cmd.startswith("keyalt:"):
+            self._handle_win_key_cmd(cmd)
+
+    def _win_keys_active(self) -> bool:
+        """Windows 焦点外快捷键是否应响应。"""
+        if self.settings.get("click_through_force", False):
+            return False
+        if self._pointer_over_pet or self.dragging or self.right_dragging:
+            return True
+        return time.time() < float(getattr(self, "_win_keys_until", 0.0) or 0.0)
+
+    def _handle_win_key_cmd(self, cmd: str) -> None:
+        """处理 WinFocusKeys 丢进队列的按键命令。"""
+        if cmd == "keyesc":
+            self.stop()
+            return
+        if cmd == "keyspace":
+            self.brain.react_jump()
+            self.roach.target_scale = 1.2
+            self.fx("star", 4)
+            return
+        if cmd == "keyleft":
+            self.brain.react_nudge(-3.5, 0)
+            self.roach.set_facing(-1)
+            return
+        if cmd == "keyright":
+            self.brain.react_nudge(3.5, 0)
+            self.roach.set_facing(1)
+            return
+        if cmd == "keydown":
+            self.brain.react_nudge(0, 3.5)
+            self.roach.set_facing(0, 1)
+            return
+        if cmd == "keyup":
+            self.brain.react_nudge(0, -3.5)
+            self.roach.set_facing(0, -1)
+            self.roach.target_scale = 1.1
+            return
+        if cmd.startswith("keyalt:"):
+            ch = cmd.split(":", 1)[-1]
+            if ch:
+                self._cat_hotkey(ch)
+            return
+        if cmd.startswith("key:"):
+            ch = cmd.split(":", 1)[-1]
+            if ch:
+                self._dispatch_char_key(ch)
 
     def toggle_click_through(self):
         self.settings["click_through_force"] = not self.settings.get("click_through_force", False)
@@ -4326,6 +4380,7 @@ class RoachPet:
     def _update_mouse_passthrough(self):
         """鼠标不在小猫上时穿透点击；强制穿透模式下始终穿透。"""
         if self.settings.get("click_through_force", False):
+            self._pointer_over_pet = False
             if IS_MAC and self.window is not None:
                 self.window.setIgnoresMouseEvents_(True)
                 return
@@ -4338,6 +4393,7 @@ class RoachPet:
             self.dragging or self.right_dragging
             or (0 <= lx < self.canvas.get_width() and 0 <= ly < self.canvas.get_height() and self._hit(lx, ly))
         )
+        self._pointer_over_pet = bool(over)
         if IS_MAC and self.window is not None:
             self.window.setIgnoresMouseEvents_(not over)
             return
@@ -4426,6 +4482,8 @@ class RoachPet:
             return
         if IS_WIN:
             self._win_focus_for_input()
+            # 点过后 90 秒内即使鼠标稍稍移开也可按快捷键
+            self._win_keys_until = time.time() + 90.0
 
         # 睡觉时单击叫醒，稍后仍会回窝趴着
         if self.brain.state == State.SLEEP:
@@ -4601,6 +4659,7 @@ class RoachPet:
             return
         if IS_WIN:
             self._win_focus_for_input()
+            self._win_keys_until = time.time() + 90.0
         if self.brain.state == State.SLEEP:
             self.brain.go_hide()
             self.fx("star", 3)
@@ -4889,7 +4948,8 @@ class RoachPet:
         print("习性: 平时角落趴窝，互动才跑出来；鼠标凑近会换窝")
         print("产品: 菜单栏/托盘 | Ctrl+Alt+R召唤 /总览 P穿透 S状态 Q退出")
         if IS_WIN:
-            print("Windows: 先点小猫再按快捷键 | 托盘在任务栏右下(可能在 ^ 里) | 显示桌面后会自动回来")
+            print("Windows: 鼠标放在小猫上（或刚点过）按 N/C/Alt+M… 即可，不必点控制台")
+            print("Windows: 托盘在任务栏右下(可能在 ^ 里) | 显示桌面后会自动回来")
             print("点击修饰: Ctrl+Shift+点=召唤 | Ctrl+点=大餐 | Alt+点=喂食 | Shift+点=跳舞")
             print("猫咪专属: Alt+字母 (M连喵 S晒太阳 R抓挠 G送礼 T死盯 N推桌 … A随机)")
         else:
@@ -4941,7 +5001,18 @@ class RoachPet:
                     self._running = False
                     break
                 if ev.type == pygame.KEYDOWN:
-                    if self._handle_pygame_key(ev):
+                    if IS_WIN:
+                        # 字母/方向键由 WinFocusKeys(pynput) 处理；这里只收 Esc，避免双触发
+                        if ev.key == pygame.K_ESCAPE:
+                            self._persist()
+                            if self._chrome is not None:
+                                try:
+                                    self._chrome.stop()
+                                except Exception:
+                                    pass
+                            self._running = False
+                            break
+                    elif self._handle_pygame_key(ev):
                         self._running = False
                         break
                 elif ev.type == pygame.MOUSEBUTTONDOWN:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import queue
 import sys
 import threading
 from typing import Any, Callable
@@ -12,16 +11,148 @@ IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
 
 
+class WinFocusKeys:
+    """
+    Windows：不依赖 pygame 窗口焦点的快捷键桥。
+    仅在「鼠标在小猫上 / 刚点过小猫」时生效，避免抢其它窗口的输入。
+    """
+
+    def __init__(self, enqueue: Callable[[str], None], is_active: Callable[[], bool]):
+        self._enqueue = enqueue
+        self._is_active = is_active
+        self._listener = None
+        self._alt = False
+        self._ctrl = False
+        self._shift = False
+        self._win = False
+
+    def start(self) -> None:
+        try:
+            from pynput import keyboard
+        except ImportError:
+            print("⚠️ 未安装 pynput，Windows 焦点外快捷键不可用")
+            return
+
+        def on_press(key):
+            self._update_mods(key, True)
+            if not self._is_active():
+                return
+            # Ctrl+Alt 留给全局热键；Ctrl/Win 单独修饰时不抢单键
+            if self._ctrl or self._win:
+                return
+            cmd = self._map_key(key)
+            if cmd:
+                self._enqueue(cmd)
+
+        def on_release(key):
+            self._update_mods(key, False)
+
+        try:
+            self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self._listener.daemon = True
+            self._listener.start()
+            print("Windows 快捷键: 鼠标放在小猫上（或刚点过）即可按 N/C/Alt+M…，无需点进控制台")
+        except Exception as exc:
+            print(f"⚠️ Windows 快捷键桥启动失败: {exc}")
+            self._listener = None
+
+    def stop(self) -> None:
+        try:
+            if self._listener is not None:
+                self._listener.stop()
+        except Exception:
+            pass
+        self._listener = None
+
+    def _update_mods(self, key, pressed: bool) -> None:
+        try:
+            from pynput.keyboard import Key
+        except ImportError:
+            return
+        if key in (Key.alt, Key.alt_l, Key.alt_r):
+            self._alt = pressed
+        elif key in (Key.ctrl, Key.ctrl_l, Key.ctrl_r):
+            self._ctrl = pressed
+        elif key in (Key.shift, Key.shift_l, Key.shift_r):
+            self._shift = pressed
+        elif key in (Key.cmd, Key.cmd_l, Key.cmd_r):
+            self._win = pressed
+
+    def _map_key(self, key) -> str | None:
+        try:
+            from pynput.keyboard import Key
+        except ImportError:
+            return None
+        if key == Key.esc:
+            return "keyesc"
+        if key == Key.space:
+            return "keyspace"
+        if key == Key.left:
+            return "keyleft"
+        if key == Key.right:
+            return "keyright"
+        if key == Key.up:
+            return "keyup"
+        if key == Key.down:
+            return "keydown"
+
+        ch = None
+        try:
+            if getattr(key, "char", None):
+                ch = str(key.char)
+        except Exception:
+            ch = None
+        if not ch:
+            vk = getattr(key, "vk", None)
+            if isinstance(vk, int):
+                # 字母 / 数字（Alt 按下时 char 常为空）
+                if 65 <= vk <= 90:
+                    ch = chr(vk)
+                elif 48 <= vk <= 57:
+                    ch = chr(vk)
+                elif 96 <= vk <= 105:  # numpad
+                    ch = chr(ord("0") + (vk - 96))
+                else:
+                    punct = {
+                        186: ";",
+                        188: ",",
+                        189: "-",
+                        190: ".",
+                        191: "/",
+                        187: "=",
+                        219: "[",
+                        220: "\\",
+                        221: "]",
+                        222: "'",
+                    }
+                    ch = punct.get(vk)
+        if not ch:
+            return None
+        ch = ch.lower()[:1]
+        if not ch:
+            return None
+        if self._alt:
+            return f"keyalt:{ch}"
+        return f"key:{ch}"
+
+
 class DesktopChrome:
     """
     后台 UI：Mac NSStatusItem / Win 系统托盘；pynput 全局热键。
     所有动作只往 queue 丢字符串命令，由 pet.tick 里 drain。
     """
 
-    def __init__(self, enqueue: Callable[[str], None], settings: dict[str, Any]):
+    def __init__(
+        self,
+        enqueue: Callable[[str], None],
+        settings: dict[str, Any],
+        win_keys_active: Callable[[], bool] | None = None,
+    ):
         self._enqueue = enqueue
         self.settings = settings
+        self._win_keys_active = win_keys_active
         self._hotkey_listener = None
+        self._win_focus_keys: WinFocusKeys | None = None
         self._status_item = None  # mac
         self._tray_icon = None  # win
         self._started = False
@@ -36,6 +167,9 @@ class DesktopChrome:
             self._start_mac_status()
         elif IS_WIN:
             threading.Thread(target=self._start_win_tray, daemon=True).start()
+            if self._win_keys_active is not None:
+                self._win_focus_keys = WinFocusKeys(self._enqueue, self._win_keys_active)
+                self._win_focus_keys.start()
 
     def stop(self) -> None:
         try:
@@ -44,6 +178,12 @@ class DesktopChrome:
         except Exception:
             pass
         self._hotkey_listener = None
+        if self._win_focus_keys is not None:
+            try:
+                self._win_focus_keys.stop()
+            except Exception:
+                pass
+            self._win_focus_keys = None
         if self._tray_icon is not None:
             try:
                 self._tray_icon.stop()
