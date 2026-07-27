@@ -7,7 +7,7 @@ a = Analysis(
     ['cockroach_pet.py'],
     pathex=[],
     binaries=[],
-    datas=[('cockroach.png', '.'), ('image', 'image')],
+    datas=[('cockroach.png', '.'), ('image', 'image'), ('codex_pets', 'codex_pets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

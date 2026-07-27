@@ -2,6 +2,7 @@
 
 import math
 import os
+import json
 import queue
 import random
 import sys
@@ -114,6 +115,7 @@ def app_dir() -> str:
 _BASE_DIR = resource_dir()
 IMAGE_PATH = os.path.join(_BASE_DIR, "cockroach.png")
 CAT_IMAGE_DIR = os.path.join(_BASE_DIR, "image")
+CODEX_PETS_DIR = os.path.join(_BASE_DIR, "codex_pets")
 # 小猫 GIF：Idle / Waving / Running / Waiting / Review
 CAT_ANIM_FILES = {
     "idle": "Idle.gif",
@@ -121,6 +123,25 @@ CAT_ANIM_FILES = {
     "running": "Running.gif",
     "waiting": "Waiting.gif",
     "review": "Review.gif",
+}
+# Codex spritesheet（awesome-codex-pet）动作行 → 本项目动画名
+# 参考: https://github.com/legeling/awesome-codex-pet
+CODEX_CELL_W, CODEX_CELL_H = 192, 208
+CODEX_COLUMNS = 8
+CODEX_ANIM_ROWS = {
+    # name: (row, frame_durations_ms)
+    "idle": (0, [280, 110, 110, 140, 140, 320]),
+    "running": (1, [120, 120, 120, 120, 120, 120, 120, 220]),  # running-right
+    "waving": (3, [140, 140, 140, 280]),
+    "waiting": (6, [150, 150, 150, 150, 150, 260]),
+    "review": (8, [150, 150, 150, 150, 150, 280]),
+}
+CLASSIC_APPEARANCE = {
+    "slug": "_classic",
+    "name": "Classic Cat",
+    "name_zh": "经典小猫",
+    "author": "local",
+    "source": "image/",
 }
 # Running 贴图默认头朝右；其它多为正面坐姿
 CAT_SIDE_ANIMS = frozenset({"running"})
@@ -1554,6 +1575,86 @@ def load_gif_clip(path: str, width: int = SPRITE_W) -> tuple[list[pygame.Surface
     return frames, durations
 
 
+def list_codex_cat_appearances() -> list[dict]:
+    """读取 codex_pets/manifest.json 中的猫咪形象列表。"""
+    path = os.path.join(CODEX_PETS_DIR, "manifest.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.loads(f.read())
+    except Exception:
+        return []
+    out = []
+    for item in data if isinstance(data, list) else []:
+        slug = str(item.get("slug") or "")
+        sheet = os.path.join(CODEX_PETS_DIR, slug, "spritesheet.webp")
+        if slug and os.path.isfile(sheet):
+            out.append(dict(item))
+    return out
+
+
+def list_cat_appearances() -> list[dict]:
+    """可选形象：经典 GIF + Codex 猫咪精灵图。"""
+    apps: list[dict] = []
+    classic_ok = all(
+        os.path.isfile(os.path.join(CAT_IMAGE_DIR, fname)) for fname in CAT_ANIM_FILES.values()
+    )
+    if classic_ok:
+        apps.append(dict(CLASSIC_APPEARANCE))
+    apps.extend(list_codex_cat_appearances())
+    return apps
+
+
+def pick_random_appearance() -> dict:
+    apps = list_cat_appearances()
+    if not apps:
+        return dict(CLASSIC_APPEARANCE)
+    return random.choice(apps)
+
+
+def load_codex_spritesheet(
+    path: str,
+    width: int = SPRITE_W,
+    version: int = 1,
+) -> dict[str, tuple[list[pygame.Surface], list[int]]]:
+    """把 Codex spritesheet.webp 切成 idle/waving/running/waiting/review。"""
+    try:
+        from PIL import Image
+    except ImportError as e:
+        raise RuntimeError("需要安装 pillow 才能加载 Codex 精灵图：pip install pillow") from e
+
+    if not pygame.get_init():
+        pygame.init()
+    if pygame.display.get_surface() is None:
+        pygame.display.set_mode((1, 1))
+
+    atlas = Image.open(path).convert("RGBA")
+    expected_h = CODEX_CELL_H * (11 if int(version) >= 2 else 9)
+    expected_w = CODEX_CELL_W * CODEX_COLUMNS
+    if atlas.size[0] < expected_w or atlas.size[1] < CODEX_CELL_H * 9:
+        raise RuntimeError(f"spritesheet 尺寸异常: {atlas.size} ({path})")
+
+    clips: dict[str, tuple[list[pygame.Surface], list[int]]] = {}
+    for name, (row, durs) in CODEX_ANIM_ROWS.items():
+        frames: list[pygame.Surface] = []
+        for col in range(len(durs)):
+            box = (
+                col * CODEX_CELL_W,
+                row * CODEX_CELL_H,
+                (col + 1) * CODEX_CELL_W,
+                (row + 1) * CODEX_CELL_H,
+            )
+            cell = atlas.crop(box)
+            tw = width
+            th = max(1, int(width * cell.height / max(1, cell.width)))
+            if cell.size != (tw, th):
+                cell = cell.resize((tw, th), Image.Resampling.NEAREST)
+            frames.append(_pil_to_surface(cell))
+        clips[name] = (frames, [max(40, int(d)) for d in durs])
+    return clips
+
+
 def load_roach_sprite(width: int = SPRITE_W, skin: str = "default") -> pygame.Surface:
     """回退：加载静态贴图（无小猫 GIF 时）。"""
     if not pygame.get_init():
@@ -1613,10 +1714,11 @@ def cat_anim_for_state(state: "State", moving: bool, hide_settled: bool = False)
 # ── 小猫 GIF 渲染（Idle / Waving / Running / Waiting / Review）──
 
 class RoachRenderer:
-    """主形象：image/*.gif 小猫动作；无资源时回退静态贴图。"""
+    """主形象：经典 GIF 或 Codex 猫咪精灵图；无资源时回退静态贴图。"""
 
-    def __init__(self, skin: str = "default"):
+    def __init__(self, skin: str = "default", appearance: dict | None = None):
         self.skin = skin
+        self.appearance = dict(appearance or CLASSIC_APPEARANCE)
         self.clips: dict[str, tuple[list[pygame.Surface], list[int]]] = {}
         self._raw_clips: dict[str, tuple[list[pygame.Surface], list[int]]] = {}
         self.use_cat = False
@@ -1646,29 +1748,39 @@ class RoachRenderer:
         self.sw, self.sh = self.base.get_size()
 
     def _load_visuals(self, skin: str) -> pygame.Surface:
+        loaded = self._load_appearance_clips()
+        if loaded and len(loaded) >= 3 and "idle" in loaded:
+            self.use_cat = True
+            self._raw_clips = loaded
+            self.clips = self._tint_clips(loaded, skin)
+            label = self.appearance.get("name_zh") or self.appearance.get("name") or self.appearance.get("slug")
+            print(f"✅ 形象已加载: {label} → {', '.join(sorted(self.clips))} ({SPRITE_W}px)")
+            return self.clips["idle"][0][0]
+        self.use_cat = False
+        print("⚠️ 小猫动画不完整，回退静态贴图")
+        return load_roach_sprite(SPRITE_W, skin=skin)
+
+    def _load_appearance_clips(self) -> dict[str, tuple[list[pygame.Surface], list[int]]]:
+        slug = str(self.appearance.get("slug") or CLASSIC_APPEARANCE["slug"])
+        if slug != CLASSIC_APPEARANCE["slug"]:
+            sheet = os.path.join(CODEX_PETS_DIR, slug, "spritesheet.webp")
+            if os.path.isfile(sheet):
+                try:
+                    ver = int(self.appearance.get("spriteVersionNumber") or 1)
+                    return load_codex_spritesheet(sheet, SPRITE_W, version=ver)
+                except Exception as e:
+                    print(f"⚠️ Codex 精灵图加载失败 ({slug}): {e}，尝试经典 GIF")
         loaded: dict[str, tuple[list[pygame.Surface], list[int]]] = {}
-        missing = []
         for key, fname in CAT_ANIM_FILES.items():
             path = os.path.join(CAT_IMAGE_DIR, fname)
             if not os.path.isfile(path):
-                missing.append(fname)
                 continue
             try:
                 frames, durs = load_gif_clip(path, SPRITE_W)
                 loaded[key] = (frames, durs)
             except Exception as e:
                 print(f"⚠️ 加载 {fname} 失败: {e}")
-                missing.append(fname)
-        if len(loaded) >= 3 and "idle" in loaded:
-            self.use_cat = True
-            self._raw_clips = loaded
-            self.clips = self._tint_clips(loaded, skin)
-            print(f"✅ 小猫 GIF 已加载: {', '.join(sorted(self.clips))} ({SPRITE_W}px)")
-            return self.clips["idle"][0][0]
-        self.use_cat = False
-        if missing:
-            print(f"⚠️ 小猫 GIF 不完整（缺 {missing}），回退静态贴图")
-        return load_roach_sprite(SPRITE_W, skin=skin)
+        return loaded
 
     def _tint_clips(
         self,
@@ -2374,7 +2486,8 @@ class RoachPet:
         unlocked = set(self.progress.get("unlocked_skins") or ["default"])
         if skin not in unlocked and skin not in ("default", "gold", "ghost"):
             skin = "default"
-        self.roach = RoachRenderer(skin=skin)
+        self.appearance = pick_random_appearance()
+        self.roach = RoachRenderer(skin=skin, appearance=self.appearance)
         self.roach.fade = False  # 小猫始终清晰，不做半透明淡化
         self.roach.target_alpha = 255
         self.roach.alpha = 255
@@ -2459,7 +2572,7 @@ class RoachPet:
             self.buddy = None
             self._sync_layout()
             return
-        buddy_roach = RoachRenderer(skin="default")
+        buddy_roach = RoachRenderer(skin="default", appearance=self.appearance)
         buddy_roach.fade = False
         self.buddy = AccountantBuddy(
             buddy_roach,
@@ -2926,9 +3039,13 @@ class RoachPet:
         self._next_banter = time.time() + random.uniform(min(lo, hi), max(lo, hi))
 
     def _queue_startup_greetings(self):
+        label = (
+            getattr(self, "appearance", {}) or {}
+        ).get("name_zh") or (getattr(self, "appearance", {}) or {}).get("name") or "小猫"
         if self.settings.get("bubbles_enabled", True):
             tip = f"{greeting_by_period()} {date_phrase()}"
             self.bubbles.push(tip, life=160)
+            self.bubbles.push(f"今日形象:{label}", life=140)
             if is_workday():
                 self.bubbles.push(worker_startup_tip(), life=140)
         # 挥爪打个招呼，随后回窗台趴窝

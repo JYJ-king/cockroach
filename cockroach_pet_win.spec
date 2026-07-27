@@ -9,9 +9,10 @@ a = Analysis(
     ['cockroach_pet.py'],
     pathex=[],
     binaries=[],
-    datas=[
+        datas=[
         ('cockroach.png', '.'),
         ('image', 'image'),
+        ('codex_pets', 'codex_pets'),
         ('packs', 'packs'),
         ('skins', 'skins'),
     ],

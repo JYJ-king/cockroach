@@ -37,7 +37,7 @@ REM 或 run.bat
 | 话术包 | `packs/*.json`，可改文案后菜单「重载话术包」 |
 | 监控表演 | CPU/内存高等级时旋转、缩身、特效联动 |
 | 皮肤 | `=` 或菜单切换：`default` / `gold` / `ghost`（也可放 `skins/*.png`） |
-| 形象 | `image/*.gif` 小猫：Idle / Waving / Running / Waiting / Review；无半透明淡化 |
+| 形象 | `image/*.gif` 经典小猫 + `codex_pets/`（来自 [awesome-codex-pet](https://github.com/legeling/awesome-codex-pet)）；**每次启动随机一只** |
 | 猫咪互动 | 摸头踩奶、纸箱、面团、打猎/毛线、激光、观鸟、露肚、扑击；Alt/⌥ 连喵/晒太阳/抓挠/送礼/死盯/推桌/蹭头等 |
 | 双宠 | 对喷时会计猫现身互怼，平时仅主宠；`,` / `Ctrl+Alt+B` 手动开吵 |
 | 故事大会 | `T` / 菜单：本地或 AI 短篇连播 |
