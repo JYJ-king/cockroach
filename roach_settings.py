@@ -34,8 +34,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "idle_showcase": True,
     # 屏幕自主移动/周期表演：引导可选 5/10/30/60 分钟，默认 5 分钟
     "interaction_interval_sec": 300,
+    # 相位错开：周期表演偏短窗(0.9~1.0×)，自主行为偏长窗(1.0~1.1×)
     "idle_showcase_min": 270,
-    "idle_showcase_max": 330,
+    "idle_showcase_max": 300,
     "rest_reminder": True,
     "rest_reminder_interval_sec": 3600,
     # 护眼/喝水/伸展：轻量气泡提醒，间隔可在 settings 改（秒）
@@ -44,12 +45,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "care_eye_sec": 1200,       # 默认 20 分钟（20-20-20）
     "care_water_sec": 1800,     # 默认 30 分钟
     "care_stretch_sec": 2700,   # 默认 45 分钟
-    # 专注番茄钟：手动开倒计时，结束后猫跑来催休息（秒，默认 25 分）
+    # 专注番茄钟：手动开倒计时；结束是否催休息受 rest_reminder 约束
     "focus_pomodoro_sec": 1500,
     # 无人操作时自主散步/发呆/瞌睡/攀爬/倒挂
     "autonomy": True,
     "autonomy_idle_sec": 45,
-    "autonomy_min": 270,
+    "autonomy_min": 300,
     "autonomy_max": 330,
     "autonomy_respect_focus": True,
     # 会议/共享/投屏/截图：共享与投屏收起；截图热键躲闪；开会安静
@@ -156,18 +157,59 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def save_provider_api_key(app_dir: str, provider: str, api_key: str) -> None:
+    """把指定厂商的 api_key 写入 secrets.json（不进 settings.json）。"""
+    path = secrets_path(app_dir)
+    data: dict[str, Any] = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                data = raw
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    ai = data.setdefault("ai", {})
+    if not isinstance(ai, dict):
+        ai = {}
+        data["ai"] = ai
+    providers = ai.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        providers = {}
+        ai["providers"] = providers
+    entry = providers.setdefault(str(provider), {})
+    if not isinstance(entry, dict):
+        entry = {}
+        providers[str(provider)] = entry
+    entry["api_key"] = str(api_key or "").strip()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except OSError as exc:
+        print(f"⚠️ 无法保存 secrets.json: {exc}")
+        raise
+
+
 def apply_interaction_interval(settings: dict[str, Any], sec: int | None = None) -> dict[str, Any]:
-    """写入互动间隔（秒）并同步自主散步/周期表演的随机窗口（±10%）。"""
+    """写入引导「互动频率」主字段，并同步自主/周期表演窗口（相位错开）。
+
+    - idle_showcase：interaction_interval_sec × (0.9~1.0)
+    - autonomy：interaction_interval_sec × (1.0~1.1)
+    避免两者共用同一随机区间导致前后脚撞车。
+    """
     if sec is None:
         sec = int(settings.get("interaction_interval_sec") or 300)
     sec = max(300, min(3600, int(sec)))
-    lo = max(60, int(sec * 0.9))
-    hi = max(lo + 1, int(sec * 1.1))
+    sc_lo = max(60, int(sec * 0.9))
+    sc_hi = max(sc_lo + 1, int(sec * 1.0))
+    au_lo = max(60, int(sec * 1.0))
+    au_hi = max(au_lo + 1, int(sec * 1.1))
     settings["interaction_interval_sec"] = sec
-    settings["autonomy_min"] = lo
-    settings["autonomy_max"] = hi
-    settings["idle_showcase_min"] = lo
-    settings["idle_showcase_max"] = hi
+    settings["idle_showcase_min"] = sc_lo
+    settings["idle_showcase_max"] = sc_hi
+    settings["autonomy_min"] = au_lo
+    settings["autonomy_max"] = au_hi
     return settings
 
 

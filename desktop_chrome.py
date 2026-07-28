@@ -360,9 +360,11 @@ class DesktopChrome:
         enqueue: Callable[[str], None],
         settings: dict[str, Any],
         win_keys_active: Callable[[], bool] | None = None,
+        progress: dict[str, Any] | None = None,
     ):
         self._enqueue = enqueue
         self.settings = settings
+        self.progress = progress if isinstance(progress, dict) else {}
         self._win_keys_active = win_keys_active
         self._hotkey_listener = None
         self._win_focus_keys: WinFocusKeys | None = None
@@ -557,10 +559,24 @@ class DesktopChrome:
         None,
         ("开关 AI", "toggle_ai"),
         ("切换 AI 厂商", "cycle_ai_provider"),
+        ("设置 AI 密钥", "set_ai_key"),
         ("显示称号", "titles"),
         ("重载话术包", "reload_packs"),
         ("重新开始引导", "replay_onboarding"),
     )
+
+    def support_feedback_count(self) -> int:
+        stats = (self.progress or {}).get("support_fp_stats") or {}
+        return int(stats.get("total") or 0)
+
+    def _menu_label(self, title: str, cmd: str) -> str:
+        """动态菜单文案（误判反馈次数等）。"""
+        if cmd == "dismiss_buddy_support":
+            n = self.support_feedback_count()
+            if n > 0:
+                return f"这次不是月结(已记{n}次)"
+            return "这次不是月结(取消应援)"
+        return title
 
     def rebuild_menus(self) -> None:
         """极简/完整模式切换后刷新菜单栏或托盘。"""
@@ -655,7 +671,7 @@ class DesktopChrome:
         print("⚠️ 菜单栏图标未显示（macOS 26 Tahoe 常见）")
         print("   1. 系统设置 → 菜单栏 → 找到 Terminal 或 Python → 设为「在菜单栏中显示」")
         print("   2. 若仍无图标：系统设置 → 控制中心 → 菜单栏项 → 同上打开")
-        print("   3. 备用：⌘+⌥+点击小猫 → 弹出同款菜单")
+        print("   3. 备用：Ctrl+Shift+点击小猫（或 ⌘+⌥+点击）→ 弹出同款菜单")
         fy = health.get("frame_y")
         sh = health.get("screen_h")
         if fy is not None:
@@ -683,7 +699,7 @@ class DesktopChrome:
         self._start_mac_status(quiet=quiet)
 
     def pop_mac_menu_at_event(self, event) -> bool:
-        """Mac 备用：在鼠标位置弹出与菜单栏相同的 NSMenu。"""
+        """Mac：在鼠标位置弹出与菜单栏相同的 NSMenu。"""
         if not IS_MAC or self._mac_menu is None:
             return False
         try:
@@ -700,6 +716,112 @@ class DesktopChrome:
             return True
         except Exception as exc:
             print(f"⚠️ 弹出菜单失败: {exc}")
+            return False
+
+    def pop_context_menu(self, screen_x: int | None = None, screen_y: int | None = None, event=None) -> bool:
+        """双端：在指针旁弹出与菜单栏/托盘同结构的菜单（Ctrl+Shift+点小猫）。"""
+        if IS_MAC:
+            if event is not None:
+                return self.pop_mac_menu_at_event(event)
+            if self._mac_menu is None:
+                return False
+            try:
+                from AppKit import NSEvent, NSMakePoint
+
+                if screen_x is None or screen_y is None:
+                    loc = NSEvent.mouseLocation()
+                    screen_x, screen_y = int(loc.x), int(loc.y)
+                self._mac_menu.popUpMenuPositioningItem_atLocation_inView_(
+                    None, NSMakePoint(float(screen_x), float(screen_y)), None
+                )
+                return True
+            except Exception as exc:
+                print(f"⚠️ 弹出菜单失败: {exc}")
+                return False
+        if IS_WIN:
+            return self._pop_win_context_menu(screen_x, screen_y)
+        return False
+
+    def _pop_win_context_menu(self, screen_x: int | None, screen_y: int | None) -> bool:
+        """Windows：用 tkinter 在指针处弹出与托盘同结构的菜单。"""
+        try:
+            import tkinter as tk
+        except ImportError:
+            print("⚠️ 缺少 tkinter，无法弹出菜单；请用任务栏托盘")
+            return False
+        try:
+            if screen_x is None or screen_y is None:
+                import ctypes
+                from ctypes import wintypes
+
+                class POINT(ctypes.Structure):
+                    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+                pt = POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                screen_x, screen_y = int(pt.x), int(pt.y)
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            menu = tk.Menu(root, tearoff=0)
+
+            def add_cmd(parent, title: str, cmd: str) -> None:
+                parent.add_command(
+                    label=self._menu_label(title, cmd),
+                    command=lambda c=cmd: self._emit(c),
+                )
+
+            def add_cascade(parent, title: str, rows: tuple) -> None:
+                sub = tk.Menu(parent, tearoff=0)
+                for row in rows:
+                    if row is None:
+                        sub.add_separator()
+                    else:
+                        add_cmd(sub, row[0], row[1])
+                parent.add_cascade(label=title, menu=sub)
+
+            if self._simple():
+                for title, cmd in self._PRIMARY_SIMPLE:
+                    add_cmd(menu, title, cmd)
+                menu.add_separator()
+                add_cascade(menu, "更多互动", self._MORE_INTERACT)
+                add_cascade(menu, "更多设置", self._MORE_SETTINGS)
+                menu.add_separator()
+                add_cmd(menu, "关闭极简模式", "toggle_simple_mode")
+                add_cmd(menu, "退出", "quit")
+            else:
+                add_cmd(menu, "召唤过来", "call")
+                add_cmd(menu, "摸头", "pet")
+                add_cmd(menu, "投喂", "feed")
+                add_cmd(menu, "纸箱", "box")
+                add_cmd(menu, "睡觉", "sleep")
+                add_cmd(menu, "系统总览", "overview")
+                add_cmd(menu, "状态", "status")
+                menu.add_separator()
+                for row in self._MORE_SETTINGS:
+                    if row is None:
+                        menu.add_separator()
+                    else:
+                        add_cmd(menu, row[0], row[1])
+                menu.add_separator()
+                for row in self._MORE_INTERACT:
+                    if row is None:
+                        menu.add_separator()
+                    else:
+                        add_cmd(menu, row[0], row[1])
+                menu.add_separator()
+                add_cmd(menu, "开启极简模式", "toggle_simple_mode")
+                add_cmd(menu, "退出", "quit")
+
+            try:
+                menu.tk_popup(int(screen_x), int(screen_y))
+            finally:
+                menu.grab_release()
+                root.destroy()
+            return True
+        except Exception as exc:
+            print(f"⚠️ Win 弹出菜单失败: {exc}")
             return False
 
     def _mac_status_button_image(self):
@@ -785,7 +907,9 @@ class DesktopChrome:
         menu = NSMenu.alloc().init()
 
         def add_to(parent, title: str, cmd: str) -> None:
-            mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+            mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                self._menu_label(title, cmd), None, ""
+            )
             mi.setRepresentedObject_(cmd)
             mi.setTarget_(self._mac_target)
             mi.setAction_("statusAction:")
@@ -855,7 +979,9 @@ class DesktopChrome:
                 if row is None:
                     out.append(pystray.Menu.SEPARATOR)
                 else:
-                    out.append(pystray.MenuItem(row[0], on(row[1])))
+                    out.append(
+                        pystray.MenuItem(self._menu_label(row[0], row[1]), on(row[1]))
+                    )
             return out
 
         if self._simple():

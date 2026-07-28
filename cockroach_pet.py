@@ -49,6 +49,7 @@ from roach_settings import (
     load_progress,
     load_settings,
     save_progress,
+    save_provider_api_key,
     save_settings,
 )
 from desktop_chrome import DesktopChrome
@@ -1515,6 +1516,19 @@ class Bubble:
         "蹲守结束·该休息了",
         "深度工作收工喵",
     ]
+    FOCUS_DONE_QUIET_PHRASES = [
+        "番茄到了·你忙完再歇",
+        "专注结束·我不打扰",
+        "时间到了·继续开会也行",
+        "蹲守到点·先轻声提醒",
+        "收工提示·不抢你焦点",
+    ]
+    FOCUS_DONE_NEUTRAL_PHRASES = [
+        "番茄钟结束啦",
+        "专注时间到了",
+        "番茄收工",
+        "蹲守结束",
+    ]
     GROOM_PHRASES = ["理毛中...", "舔舔", "仪表很重要", "顺一顺", "光洁如新"]
     POUNCE_PHRASES = ["扑击!", "锁定目标", "起飞!", "逮到你!", "暗杀猫"]
     BOX_PHRASES = ["纸箱是家", "钻进去!", "外面消失了", "喵窝+1", "别拆快递"]
@@ -2847,6 +2861,8 @@ class RoachPet:
         # 专注番茄钟：手动倒计时，期间安静蹲守，结束跑来催休息
         self._focus_until = 0.0
         self._focus_end_pending = False
+        # 安静门控：番茄钟/会议/投屏/系统专注/stealth → 压制主动打扰，解除后重新计时
+        self._quiet_gate_on = False
         lo = float(self.settings.get("sys_check_interval_min") or 50)
         hi = float(self.settings.get("sys_check_interval_max") or 90)
         self._next_sys_check = time.time() + random.uniform(lo, hi)
@@ -2898,6 +2914,7 @@ class RoachPet:
             self._cmd_q.put,
             self.settings,
             win_keys_active=self._win_keys_active if IS_WIN else None,
+            progress=self.progress,
         )
         self._chrome.start()
         self._start_weather_fetch()
@@ -3066,11 +3083,13 @@ class RoachPet:
             sec = presets.get(choice_id, 300)
             apply_interaction_interval(self.settings, sec)
             save_settings(self.app_root, self.settings)
-            lo = float(self.settings["autonomy_min"])
-            hi = float(self.settings["autonomy_max"])
-            gap = random.uniform(min(lo, hi), max(lo, hi))
-            self._next_autonomy = time.time() + gap
-            self._next_showcase = time.time() + gap
+            now = time.time()
+            lo_au = float(self.settings["autonomy_min"])
+            hi_au = float(self.settings["autonomy_max"])
+            lo_sc = float(self.settings["idle_showcase_min"])
+            hi_sc = float(self.settings["idle_showcase_max"])
+            self._next_autonomy = now + random.uniform(min(lo_au, hi_au), max(lo_au, hi_au))
+            self._next_showcase = now + random.uniform(min(lo_sc, hi_sc), max(lo_sc, hi_sc))
             labels = {"5m": "5分钟", "10m": "10分钟", "30m": "30分钟", "1h": "1小时"}
             reply = f"好,大概{labels.get(choice_id, '5分钟')}动一次"
         elif step_id == "appearance":
@@ -3511,16 +3530,21 @@ class RoachPet:
         self._support_worthy = False
         self.progress["support_close_pending"] = False
         save_progress(self.app_root, self.progress)
-
+        n = int(stats.get("total") or 0)
         if was_active:
-            tip = "好·今天先不应援"
+            tip = f"好·今天先不应援·已记{n}次"
             if "load" in reasons or "hold" in reasons:
-                tip = "记下了·负载不代表月结"
+                tip = f"记下了·负载≠月结·已记{n}次"
             elif "calendar" in reasons or "close_day" in reasons:
-                tip = "记下了·今天先不当月结"
-            self.say(tip, urgent=True, life=160)
+                tip = f"记下了·今天先不当月结·已记{n}次"
+            self.say(tip, urgent=True, life=170)
         else:
-            self.say("记下了·今天先不应援", urgent=True, life=140)
+            self.say(f"记下了·今天先不应援·已记{n}次", urgent=True, life=150)
+        if self._chrome is not None:
+            try:
+                self._chrome.rebuild_menus()
+            except Exception:
+                pass
 
     def _watch_support_session(self) -> None:
         """应援窗口边沿：真正月结结束 → 挂起收工仪式，等回家/睡觉触发。"""
@@ -3857,6 +3881,8 @@ class RoachPet:
             self.toggle_ai()
         elif cmd == "cycle_ai_provider":
             self.cycle_ai_provider()
+        elif cmd == "set_ai_key":
+            self.set_ai_api_key_from_menu()
         elif cmd.startswith("key") or cmd.startswith("keyalt:"):
             self._handle_win_key_cmd(cmd)
 
@@ -4168,6 +4194,10 @@ class RoachPet:
             extra = f" 专注剩{left}分"
         elif self._buddy_support_active():
             extra = " 月结应援中"
+        else:
+            n = int((self.progress.get("support_fp_stats") or {}).get("total") or 0)
+            if n > 0:
+                extra = f" 误判反馈{n}次"
         self.say(f"{mood} {hide} 亲密度{aff}{extra}", urgent=True)
 
     def say_sys_cpu(self):
@@ -4553,6 +4583,7 @@ class RoachPet:
         until = float(getattr(self, "_focus_until", 0) or 0)
         if until > 0 and time.time() >= until:
             self._focus_until = 0.0
+            # 共享/投屏收起中：等现身后再收工；开会可见时也可立刻安静收工
             if self._stealth:
                 self._focus_end_pending = True
             else:
@@ -4561,27 +4592,65 @@ class RoachPet:
         if getattr(self, "_focus_end_pending", False) and not self._stealth:
             self._finish_focus_pomodoro()
 
+    def _focus_end_should_stay_put(self) -> bool:
+        """开会/共享/投屏时：不跑向指针，避免打断打字或入镜。"""
+        if self._stealth:
+            return True
+        if not self.settings.get("meeting_silence", True):
+            return False
+        if self._meeting_level in ("meeting", "sharing") or self._casting:
+            return True
+        return False
+
     def _finish_focus_pomodoro(self) -> None:
-        """番茄结束：跑向指针，催休息（点猫可关掉）。"""
+        """番茄结束：默认跑向指针催休息；开会/共享或关闭休息提醒时改为轻提示。"""
         self._focus_end_pending = False
         self._focus_until = 0.0
-        self.roach.target_alpha = 255
-        self.roach.belly = False
-        self.brain.react_call()
-        self.brain.state_timer = max(int(self.brain.state_timer), 520)
-        self.roach.force_anim("waving", 5.5)
-        self._rest_active = True
-        self.bubbles.clear()
-        line = PACKS.pick("focus_done", Bubble.FOCUS_DONE_PHRASES)
-        self.bubbles.push_many([line, "起来活动一下", "点我关掉提示"], life=155)
-        self.fx("star", 8)
-        self.fx("heart", 4)
-        # 错开固定养生/小时休息，避免刚收工又被闹钟追着喊
         now = time.time()
         for kind in ("eye", "water", "stretch"):
             nxt = float(self._next_care.get(kind) or 0)
             self._next_care[kind] = max(nxt, now + random.uniform(700, 1400))
         self._next_rest = max(float(getattr(self, "_next_rest", 0) or 0), now + 1800)
+
+        line = PACKS.pick("focus_done", Bubble.FOCUS_DONE_PHRASES)
+        self.roach.target_alpha = 255
+        self.roach.belly = False
+
+        # 用户选过「先别催我」/关掉休息提醒：只报中性结束，不跑来催
+        if not self.settings.get("rest_reminder", True):
+            if self.brain.state not in (State.HIDE, State.SLEEP):
+                self.brain.go_hide(scramble=False)
+            self._rest_active = False
+            self.bubbles.clear()
+            neutral = PACKS.pick(
+                "focus_done_neutral",
+                Bubble.FOCUS_DONE_NEUTRAL_PHRASES,
+            )
+            self.say(neutral, urgent=True, life=120)
+            self.fx("star", 1)
+            return
+
+        if self._focus_end_should_stay_put():
+            # 安静收工：不 react_call、不抢焦点；仍提示到点
+            if self.brain.state not in (State.HIDE, State.SLEEP):
+                self.brain.go_hide(scramble=False)
+            self._rest_active = False
+            self.bubbles.clear()
+            soft = PACKS.pick("focus_done_quiet", Bubble.FOCUS_DONE_QUIET_PHRASES)
+            if soft in Bubble.FOCUS_DONE_PHRASES or soft == line:
+                soft = f"{line}·先轻声"
+            self.say(soft, urgent=True, life=140)
+            self.fx("star", 2)
+            return
+
+        self.brain.react_call()
+        self.brain.state_timer = max(int(self.brain.state_timer), 520)
+        self.roach.force_anim("waving", 5.5)
+        self._rest_active = True
+        self.bubbles.clear()
+        self.bubbles.push_many([line, "起来活动一下", "点我关掉提示"], life=155)
+        self.fx("star", 8)
+        self.fx("heart", 4)
 
     def toggle_idle_showcase(self):
         on = not self.settings.get("idle_showcase", True)
@@ -4682,6 +4751,152 @@ class RoachPet:
         ready = "已配Key" if provider_ready(self.settings, nxt) else "缺Key"
         self.say(f"AI厂商:{nxt}({ready})", urgent=True)
 
+    def _clipboard_text(self) -> str:
+        """读取系统剪贴板纯文本（失败返回空串）。"""
+        try:
+            if IS_MAC and OBJC_OK:
+                from AppKit import NSPasteboard, NSPasteboardTypeString
+
+                pb = NSPasteboard.generalPasteboard()
+                raw = pb.stringForType_(NSPasteboardTypeString)
+                return str(raw or "").strip()
+            if IS_WIN:
+                import ctypes
+                from ctypes import wintypes
+
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+                CF_UNICODETEXT = 13
+                if not user32.OpenClipboard(None):
+                    return ""
+                try:
+                    handle = user32.GetClipboardData(CF_UNICODETEXT)
+                    if not handle:
+                        return ""
+                    ptr = kernel32.GlobalLock(handle)
+                    if not ptr:
+                        return ""
+                    try:
+                        return ctypes.wstring_at(ptr).strip()
+                    finally:
+                        kernel32.GlobalUnlock(handle)
+                finally:
+                    user32.CloseClipboard()
+        except Exception:
+            return ""
+        return ""
+
+    def _prompt_ai_key_dialog(self, provider: str, has_key: bool) -> str | None:
+        """弹出输入框；返回密钥字符串，取消返回 None。空串表示确认清空。"""
+        title = "设置 AI 密钥"
+        tip = (
+            f"当前厂商: {provider}\n"
+            f"状态: {'已配置（输入新密钥可替换）' if has_key else '未配置'}\n"
+            "也可先复制密钥再点「用剪贴板」。"
+        )
+        if IS_MAC and OBJC_OK:
+            try:
+                from AppKit import (
+                    NSAlert,
+                    NSTextField,
+                    NSMakeRect,
+                    NSAlertFirstButtonReturn,
+                    NSAlertSecondButtonReturn,
+                )
+
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_(title)
+                alert.setInformativeText_(tip)
+                alert.addButtonWithTitle_("确定")
+                alert.addButtonWithTitle_("用剪贴板")
+                alert.addButtonWithTitle_("取消")
+                field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
+                field.setStringValue_("")
+                field.setPlaceholderString_("粘贴或输入 api_key")
+                alert.setAccessoryView_(field)
+                code = int(alert.runModal())
+                if code == int(NSAlertSecondButtonReturn):
+                    clip = self._clipboard_text()
+                    return clip if clip else None
+                if code != int(NSAlertFirstButtonReturn):
+                    return None
+                return str(field.stringValue() or "")
+            except Exception as exc:
+                print(f"⚠️ Mac 密钥对话框失败: {exc}")
+                return None
+        if IS_WIN:
+            try:
+                import tkinter as tk
+                from tkinter import simpledialog, messagebox
+
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                # 先问是否直接用剪贴板
+                clip = self._clipboard_text()
+                if clip and messagebox.askyesno(
+                    title,
+                    f"{tip}\n\n剪贴板里有内容，要用它作为密钥吗？",
+                    parent=root,
+                ):
+                    root.destroy()
+                    return clip
+                value = simpledialog.askstring(
+                    title,
+                    tip + "\n\n输入新密钥（取消=不改）:",
+                    parent=root,
+                    show="*",
+                )
+                root.destroy()
+                return value
+            except Exception as exc:
+                print(f"⚠️ Win 密钥对话框失败: {exc}")
+                # 回退：仅剪贴板
+                clip = self._clipboard_text()
+                return clip if clip else None
+        return None
+
+    def set_ai_api_key_from_menu(self) -> None:
+        """菜单：为当前 AI 厂商写入/替换 api_key（落盘 secrets.json）。"""
+        pname = current_provider_name(self.settings)
+        ai = self.settings.setdefault("ai", {})
+        if not isinstance(ai, dict):
+            ai = {}
+            self.settings["ai"] = ai
+        providers = ai.setdefault("providers", {})
+        if not isinstance(providers, dict):
+            providers = {}
+            ai["providers"] = providers
+        entry = providers.setdefault(pname, {})
+        if not isinstance(entry, dict):
+            entry = {}
+            providers[pname] = entry
+        has_key = bool(str(entry.get("api_key") or "").strip())
+        raw = self._prompt_ai_key_dialog(pname, has_key)
+        if raw is None:
+            self.say("已取消改密钥", urgent=True, life=90)
+            return
+        key = str(raw).strip()
+        # 去掉误粘贴的引号/空白
+        key = key.strip(" \t\r\n\"'")
+        if not key:
+            self.say("密钥为空,未改动", urgent=True, life=100)
+            return
+        try:
+            save_provider_api_key(self.app_root, pname, key)
+        except OSError:
+            self.say("保存密钥失败", urgent=True)
+            return
+        entry["api_key"] = key
+        # 确保 secrets 存在后，settings 里不再持久化 key
+        save_settings(self.app_root, self.settings)
+        # 配好密钥后默认打开 AI，方便立刻试用
+        ai["enabled"] = True
+        save_settings(self.app_root, self.settings)
+        masked = key[:4] + "…" + key[-4:] if len(key) > 10 else "****"
+        self.say(f"{pname}密钥已更新({masked})", urgent=True, life=140)
+        self.fx("star", 3)
+
     def say_help(self):
         self.bubbles.clear()
         if self.settings.get("simple_mode", True):
@@ -4731,8 +4946,15 @@ class RoachPet:
             return
         self._last_sys_alert = msg
         self._note_progress(sys_alert_count=1)
+        support = self._buddy_support_active()
+        if support:
+            # 月结应援优先：只轻声嘀咕，不做旋转/缩身/吓跑等抓眼球表演
+            soft = self._sys_alert_support_line(s, msg)
+            self.say(soft, life=110)
+            self.fx("star", 1)
+            return
         self.say(msg, life=150)
-        # 监控 → 表演联动
+        # 监控 → 表演联动（非应援）
         if s and s["cpu"] >= 85:
             self.fx("dust", 8)
             self.roach.spin_vel = 14
@@ -4752,6 +4974,18 @@ class RoachPet:
                 self.brain.go_hide(scramble=True)
             else:
                 self.brain._set(State.SCARED, 40)
+
+    def _sys_alert_support_line(self, s: dict | None, fallback: str) -> str:
+        """应援模式下的安静监控提示（陪伴语气，不渲染焦虑）。"""
+        if not s:
+            return "我在,慢慢来"
+        if s.get("cpu", 0) >= 85:
+            return "机器也忙,你辛苦了"
+        if s.get("mem_pct", 0) >= 80:
+            return "内存紧了,歇口气也行"
+        if s.get("disk_pct", 0) >= 85:
+            return "磁盘有点满,不急"
+        return fallback if len(fallback) <= 16 else "我看着呢,别慌"
 
     def _check_worker_schedule(self):
         """到点提醒：打卡、喝水、午饭、下班等。"""
@@ -5707,10 +5941,16 @@ class RoachPet:
         self.say(line, urgent=True, life=150)
 
     def _meeting_quiet(self) -> bool:
-        """开会/投屏/专注番茄/系统专注时压低主动喧哗（仍可见，除非已 stealth）。"""
+        """安静门控：压制一切「非自身」主动气泡/表演。
+
+        含：专注番茄钟（含结束仪式挂起 `_focus_end_pending`）、stealth 收起、
+        开会、共享/投屏、系统专注模式。番茄钟与会议静默同一套规则。
+        """
         if self._stealth:
             return True
         if self._focus_pomodoro_active():
+            return True
+        if getattr(self, "_focus_end_pending", False):
             return True
         if not self.settings.get("meeting_silence", True):
             return False
@@ -5720,11 +5960,56 @@ class RoachPet:
             return system_focus_active() is True
         return False
 
+    def _update_quiet_gate(self) -> None:
+        """安静门控边沿：进入只闩上；离开则把主动计时全部重新起算（不积压连发）。"""
+        quiet = self._meeting_quiet()
+        was = bool(getattr(self, "_quiet_gate_on", False))
+        if quiet and not was:
+            self._quiet_gate_on = True
+            return
+        if (not quiet) and was:
+            self._quiet_gate_on = False
+            self._reschedule_proactive_after_quiet()
+            return
+        self._quiet_gate_on = quiet
+
+    def _reschedule_proactive_after_quiet(self) -> None:
+        """安静状态结束后重新计时：延后，不把安静期积压的闹钟一次打完。"""
+        now = time.time()
+        iv = float(self.settings.get("interaction_interval_sec") or 300)
+        rest_iv = float(self.settings.get("rest_reminder_interval_sec") or 3600)
+        self._next_rest = now + max(60.0, rest_iv)
+        care_defaults = {"eye": 1200, "water": 1800, "stretch": 2700}
+        care_keys = {
+            "eye": "care_eye_sec",
+            "water": "care_water_sec",
+            "stretch": "care_stretch_sec",
+        }
+        for kind, sk in care_keys.items():
+            civ = float(self.settings.get(sk) or care_defaults[kind])
+            self._next_care[kind] = now + max(120.0, civ)
+        lo_sc = float(self.settings.get("idle_showcase_min") or iv * 0.9)
+        hi_sc = float(self.settings.get("idle_showcase_max") or iv * 1.1)
+        self._next_showcase = now + random.uniform(min(lo_sc, hi_sc), max(lo_sc, hi_sc))
+        lo_au = float(self.settings.get("autonomy_min") or iv * 0.9)
+        hi_au = float(self.settings.get("autonomy_max") or iv * 1.1)
+        self._next_autonomy = now + random.uniform(min(lo_au, hi_au), max(lo_au, hi_au))
+        self._next_proactive = now + random.uniform(iv * 1.2, iv * 2.0)
+        lo_b = float(self.settings.get("buddy_banter_min") or 120)
+        hi_b = float(self.settings.get("buddy_banter_max") or 280)
+        self._next_banter = now + random.uniform(min(lo_b, hi_b), max(lo_b, hi_b))
+        self._next_worker_idle = now + random.uniform(1500, 2400)
+        lo_sys = float(self.settings.get("sys_check_interval_min") or 50)
+        hi_sys = float(self.settings.get("sys_check_interval_max") or 90)
+        self._next_sys_check = now + random.uniform(min(lo_sys, hi_sys), max(lo_sys, hi_sys))
+        # 鼠标寻访：安静期不算「久闲」，解除后重新累计静止时间
+        self._mouse_still_since = now
+        cool = float(self.settings.get("mouse_seek_cooldown_sec") or 900)
+        self._next_mouse_seek = now + max(60.0, cool * 0.15)
+
     def _check_autonomy(self):
         """无人操作时按作息加权触发散步/发呆/瞌睡/攀爬/倒挂。"""
-        if self._stealth:
-            return
-        if self._focus_pomodoro_active():
+        if self._stealth or self._meeting_quiet():
             return
         if not self.settings.get("autonomy", True):
             return
@@ -6072,13 +6357,21 @@ class RoachPet:
         self, alt: bool, shift: bool, control: bool, meta: bool, event=None
     ) -> bool:
         """点击修饰键：操作语义跨平台一致，键位按平台。
-        Mac: ⌘召唤  Ctrl大餐  ⌥喂食  Shift跳舞
-        Win: Ctrl+Shift召唤（Win 键常被系统吞） Ctrl大餐  Alt喂食  Shift跳舞
+        Mac: ⌘召唤  Ctrl大餐  ⌥喂食  Shift跳舞；Ctrl+Shift 或 ⌘+⌥ 弹菜单
+        Win: Ctrl大餐  Alt喂食  Shift跳舞；Ctrl+Shift 弹菜单（召唤用 K / Ctrl+Alt+R）
         """
+        # 双端：Ctrl+Shift+点小猫 → 弹出菜单（托盘/菜单栏备用）
+        if control and shift and self._chrome is not None:
+            if IS_MAC:
+                if self._chrome.pop_context_menu(event=event):
+                    return True
+            else:
+                # Win pygame 事件：用当前光标屏幕坐标
+                if self._chrome.pop_context_menu():
+                    return True
         if IS_MAC:
             if meta and alt and event is not None:
-                # Tahoe 菜单栏常被挡：⌘+⌥+点小猫弹出同款菜单（不用 Ctrl+Shift）
-                if self._chrome is not None and self._chrome.pop_mac_menu_at_event(event):
+                if self._chrome is not None and self._chrome.pop_context_menu(event=event):
                     return True
             if meta:
                 self.do_call()
@@ -6087,8 +6380,8 @@ class RoachPet:
                 self.do_feed(feast=True)
                 return True
         else:
-            # Windows：优先 Ctrl+Shift / Win 召唤，避免纯 Win+点击被开始菜单截走
-            if meta or (control and shift):
+            # Windows：Win 键召唤（常被系统吞）；Ctrl+Shift 已用于菜单
+            if meta:
                 self.do_call()
                 return True
             if control:
@@ -6582,6 +6875,8 @@ class RoachPet:
         self.bubble = self.bubbles.tick()
 
         self._check_meeting_silence()
+        self._check_focus_pomodoro()
+        self._update_quiet_gate()
         self._check_onboarding_timeout()
         if self._guide_active():
             # 引导期间不抢戏：跳过主动喧哗；答谢气泡仍可 tick
@@ -6606,7 +6901,6 @@ class RoachPet:
         self._check_idle_showcase()
         self._check_rest_reminder()
         self._check_care_reminders()
-        self._check_focus_pomodoro()
         self._check_buddy_banter()
         self._watch_support_session()
         self._check_mouse_near(mx, my)
@@ -6735,18 +7029,19 @@ class RoachPet:
             print("快捷键精简: N纸箱 K召唤 F投喂 H帮助 · 右键睡觉 · 上头摸 · Esc退出")
             print("关闭极简: 菜单「关闭极简模式」可恢复全部快捷键与扁平菜单")
             if IS_WIN:
-                print("Windows: 托盘在任务栏右下(可能在 ^ 里) | 显示桌面后会自动回来")
+                print("Windows: 托盘在任务栏右下(可能在 ^ 里) | Ctrl+Shift+点小猫也可弹菜单")
             else:
-                print("Mac: 菜单栏右上角「猫」| 若无图标: ⌘+⌥+点小猫 弹出菜单")
+                print("Mac: 菜单栏右上角「猫」| 若无图标: Ctrl+Shift+点 或 ⌘+⌥+点小猫")
             return
         if IS_WIN:
             print("Windows: 鼠标放在小猫上（或刚点过）按 N/C/Alt+M… 即可，不必点控制台")
             print("Windows: 托盘在任务栏右下(可能在 ^ 里) | 显示桌面后会自动回来")
-            print("点击修饰: Ctrl+Shift+点=召唤 | Ctrl+点=大餐 | Alt+点=喂食 | Shift+点=跳舞")
+            print("点击修饰: Ctrl+Shift+点=菜单 | Ctrl+点=大餐 | Alt+点=喂食 | Shift+点=跳舞")
+            print("召唤: K 或 Ctrl+Alt+R 或托盘「召唤过来」")
             print("猫咪专属: Alt+字母 (M连喵 S晒太阳 R抓挠 G送礼 T死盯 N推桌 … A随机)")
         else:
             print("点击修饰: ⌘点=召唤 | Ctrl点=大餐 | ⌥点=喂食 | Shift点=跳舞")
-            print("菜单备用: ⌘+⌥+点小猫 弹出菜单（Tahoe 菜单栏被挡时）")
+            print("菜单备用: Ctrl+Shift+点 或 ⌘+⌥+点小猫（Tahoe 菜单栏被挡时）")
             print("猫咪专属: ⌥+字母 (M连喵 S晒太阳 R抓挠 G送礼 T死盯 N推桌 … A随机)")
         print("设置: settings.json（气泡/提醒/穿透/话术包/皮肤）")
         print("打工: G提醒 J黑话混 Y对齐 | 1站会 2复盘 3摸鱼 4反PUA")
@@ -6759,7 +7054,7 @@ class RoachPet:
         print("寻访: 鼠标约30分钟不动会跑来找你互动 | 菜单可开关")
         print("自主: 无人操作时散步/发呆/瞌睡/攀爬/倒挂 | 昼夜/专注/会议切换节奏 | 菜单可关")
         print("会议静默: 共享/投屏收起 · 截图快捷键躲闪 | 菜单可关")
-        print("AI: Ctrl+Alt+A开关 | 菜单切换厂商(deepseek/doubao/qwen) | secrets.json填Key")
+        print("AI: Ctrl+Alt+A开关 | 菜单切换厂商/设置密钥 | secrets.json亦可")
         print("猫咪: N纸箱 C回窝 E打猎/毛线 Q观鸟 Z跑酷 V炸毛 O摆拍 X扑击")
         print("      U露肚 L激光 K召唤 M跟随 | -穿透 =皮肤 D日期 W天气 S状态 H帮助 Esc退出")
         print("      报时: 中键点小猫 或 菜单状态")

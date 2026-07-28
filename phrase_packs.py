@@ -38,6 +38,8 @@ CATEGORY_KEYS = (
     "support_close",
     "meeting_end",
     "focus_done",
+    "focus_done_quiet",
+    "focus_done_neutral",
 )
 
 
