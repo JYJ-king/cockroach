@@ -2860,6 +2860,7 @@ class RoachPet:
         self._seek_act: str | None = None
         self._fx_anchor = (PAD_X + PET_W / 2, ROACH_Y + PET_H / 2)
         self._running = True
+        self._started_at = time.time()
         self.screen = None
         self.hwnd = None
         self.window = None
@@ -2901,7 +2902,7 @@ class RoachPet:
         self._chrome.start()
         self._start_weather_fetch()
         self._queue_startup_greetings()
-        self.tick()
+        # 首帧绘制留给 run()，避免 init 阶段 finishLaunching/菜单栏 干扰窗口
 
     def _onboarding_done(self) -> bool:
         return bool(
@@ -5613,6 +5614,9 @@ class RoachPet:
 
     def _check_meeting_silence(self) -> None:
         """共享/投屏/截图 → 收起；开会 → 安静档。截图热键每帧检查。"""
+        # 启动后几秒内不因检测抖动立刻藏窗（Tahoe 上偶发误判）
+        if time.time() - float(getattr(self, "_started_at", 0) or 0) < 4.0:
+            return
         now = time.time()
         if not self.settings.get("meeting_silence", True):
             self._meeting_level = ""
@@ -6064,12 +6068,18 @@ class RoachPet:
         command = bool(flags & (1 << 20))
         return option, shift, control, command
 
-    def _mouse_mod_actions(self, alt: bool, shift: bool, control: bool, meta: bool) -> bool:
+    def _mouse_mod_actions(
+        self, alt: bool, shift: bool, control: bool, meta: bool, event=None
+    ) -> bool:
         """点击修饰键：操作语义跨平台一致，键位按平台。
         Mac: ⌘召唤  Ctrl大餐  ⌥喂食  Shift跳舞
         Win: Ctrl+Shift召唤（Win 键常被系统吞） Ctrl大餐  Alt喂食  Shift跳舞
         """
         if IS_MAC:
+            if meta and alt and event is not None:
+                # Tahoe 菜单栏常被挡：⌘+⌥+点小猫弹出同款菜单（不用 Ctrl+Shift）
+                if self._chrome is not None and self._chrome.pop_mac_menu_at_event(event):
+                    return True
             if meta:
                 self.do_call()
                 return True
@@ -6154,7 +6164,7 @@ class RoachPet:
             return
 
         alt, shift, control, meta = self._modifiers(event)
-        if self._mouse_mod_actions(alt, shift, control, meta):
+        if self._mouse_mod_actions(alt, shift, control, meta, event):
             return
 
         now = pygame.time.get_ticks()
@@ -6567,6 +6577,8 @@ class RoachPet:
 
         self._flush_pending_say()
         self._drain_commands()
+        if self._chrome is not None:
+            self._chrome.mac_status_tick()
         self.bubble = self.bubbles.tick()
 
         self._check_meeting_silence()
@@ -6724,6 +6736,8 @@ class RoachPet:
             print("关闭极简: 菜单「关闭极简模式」可恢复全部快捷键与扁平菜单")
             if IS_WIN:
                 print("Windows: 托盘在任务栏右下(可能在 ^ 里) | 显示桌面后会自动回来")
+            else:
+                print("Mac: 菜单栏右上角「猫」| 若无图标: ⌘+⌥+点小猫 弹出菜单")
             return
         if IS_WIN:
             print("Windows: 鼠标放在小猫上（或刚点过）按 N/C/Alt+M… 即可，不必点控制台")
@@ -6732,6 +6746,7 @@ class RoachPet:
             print("猫咪专属: Alt+字母 (M连喵 S晒太阳 R抓挠 G送礼 T死盯 N推桌 … A随机)")
         else:
             print("点击修饰: ⌘点=召唤 | Ctrl点=大餐 | ⌥点=喂食 | Shift点=跳舞")
+            print("菜单备用: ⌘+⌥+点小猫 弹出菜单（Tahoe 菜单栏被挡时）")
             print("猫咪专属: ⌥+字母 (M连喵 S晒太阳 R抓挠 G送礼 T死盯 N推桌 … A随机)")
         print("设置: settings.json（气泡/提醒/穿透/话术包/皮肤）")
         print("打工: G提醒 J黑话混 Y对齐 | 1站会 2复盘 3摸鱼 4反PUA")
@@ -6760,6 +6775,10 @@ class RoachPet:
         clock = pygame.time.Clock()
         app = NSApplication.sharedApplication()
         self._print_help_banner()
+        # 确保窗口先出现在前台，再挂菜单栏
+        if self.window is not None and not self._stealth:
+            sx, sy = self._screen_pos()
+            self._mac_place_window(sx, sy, force_front=True)
         while self._running:
             event = app.nextEventMatchingMask_untilDate_inMode_dequeue_(
                 0xFFFFFFFF,

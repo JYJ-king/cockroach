@@ -369,6 +369,11 @@ class DesktopChrome:
         self._shot_hotkeys: ScreenshotHotkeys | None = None
         self._combined: CombinedHotkeys | None = None
         self._status_item = None  # mac
+        self._mac_menu = None
+        self._mac_autosave_name = "cockroach.pet.menubar"
+        self._mac_status_recovered = False
+        self._mac_status_warned = False
+        self._mac_status_deferred = False
         self._tray_icon = None  # win
         self._started = False
 
@@ -377,8 +382,9 @@ class DesktopChrome:
             return
         self._started = True
         # 先建菜单栏，再开 pynput，降低 ObjC/监听器竞态
+        # Mac：等 NSApplication 跑起来后再挂菜单栏（Tahoe 上过早创建易不显示）
         if IS_MAC:
-            self._start_mac_status()
+            self._mac_status_deferred = True
         elif IS_WIN:
             threading.Thread(target=self._start_win_tray, daemon=True).start()
             if self._win_keys_active is not None:
@@ -567,7 +573,186 @@ class DesktopChrome:
             except Exception as exc:
                 print(f"⚠️ 刷新托盘菜单失败: {exc}")
 
-    def _start_mac_status(self) -> None:
+    def mac_status_tick(self) -> None:
+        """主循环内：延迟创建菜单栏 + 一次性健康检查。"""
+        if not IS_MAC:
+            return
+        try:
+            self._mac_status_tick_impl()
+        except Exception as exc:
+            print(f"⚠️ 菜单栏 tick 异常（桌宠仍可用）: {exc}")
+
+    def _mac_status_tick_impl(self) -> None:
+        if self._mac_status_deferred:
+            self._mac_status_deferred = False
+            self._start_mac_status()
+            return
+        if self._mac_status_warned or self._status_item is None:
+            return
+        # 给 Control Center 约 1.5s 完成布局后再诊断
+        import time
+        if not hasattr(self, "_mac_status_check_after"):
+            self._mac_status_check_after = time.time() + 1.5
+            return
+        if time.time() < self._mac_status_check_after:
+            return
+        self._mac_status_warned = True
+        health = self._mac_status_health()
+        if health.get("ok"):
+            return
+        if not self._mac_status_recovered and health.get("offscreen"):
+            self._mac_recover_status_item(quiet=True)
+            health = self._mac_status_health()
+            if health.get("ok"):
+                print("菜单栏: 已重新挂载离屏图标")
+                return
+        self._print_mac_status_help(health)
+
+    def _mac_status_health(self) -> dict:
+        """AppKit 坐标原点在左下：菜单栏图标的 y 应接近屏幕顶部（大数值）。"""
+        item = self._status_item
+        if item is None:
+            return {"ok": False, "reason": "no_item"}
+        visible = True
+        if hasattr(item, "isVisible"):
+            vis = item.isVisible
+            visible = bool(vis() if callable(vis) else vis)
+        btn = item.button() if hasattr(item, "button") else None
+        frame_y = None
+        screen_h = None
+        screen_nil = False
+        offscreen = False
+        if btn is not None:
+            win = btn.window()
+            if win is not None:
+                frame = win.frame()
+                frame_y = float(frame.origin.y)
+                scr = win.screen()
+                if scr is None:
+                    screen_nil = True
+                else:
+                    screen_h = float(scr.frame().size.height)
+                # Tahoe 常见：y<0 飞出顶外；或误放到屏幕下半（y 过小）
+                if frame_y < -2:
+                    offscreen = True
+                elif screen_h is not None and frame_y < screen_h * 0.5:
+                    offscreen = True
+            elif hasattr(btn, "frame"):
+                bf = btn.frame()
+                if float(bf.size.width) < 4:
+                    offscreen = True
+        ok = visible and not offscreen and not screen_nil
+        return {
+            "ok": ok,
+            "visible": visible,
+            "offscreen": offscreen,
+            "screen_nil": screen_nil,
+            "frame_y": frame_y,
+            "screen_h": screen_h,
+        }
+
+    def _print_mac_status_help(self, health: dict) -> None:
+        print("⚠️ 菜单栏图标未显示（macOS 26 Tahoe 常见）")
+        print("   1. 系统设置 → 菜单栏 → 找到 Terminal 或 Python → 设为「在菜单栏中显示」")
+        print("   2. 若仍无图标：系统设置 → 控制中心 → 菜单栏项 → 同上打开")
+        print("   3. 备用：⌘+⌥+点击小猫 → 弹出同款菜单")
+        fy = health.get("frame_y")
+        sh = health.get("screen_h")
+        if fy is not None:
+            extra = f"frame.y={fy}"
+            if sh is not None:
+                extra += f" screen.h={sh}"
+            print(f"   （诊断: visible={health.get('visible')} {extra}）")
+
+    def _mac_recover_status_item(self, quiet: bool = False) -> None:
+        if self._mac_status_recovered:
+            return
+        self._mac_status_recovered = True
+        try:
+            from AppKit import NSStatusBar
+        except ImportError:
+            return
+        if self._status_item is not None:
+            try:
+                NSStatusBar.systemStatusBar().removeStatusItem_(self._status_item)
+            except Exception:
+                pass
+        self._status_item = None
+        self._mac_menu = None
+        self._mac_autosave_name = "cockroach.pet.menubar.recovered"
+        self._start_mac_status(quiet=quiet)
+
+    def pop_mac_menu_at_event(self, event) -> bool:
+        """Mac 备用：在鼠标位置弹出与菜单栏相同的 NSMenu。"""
+        if not IS_MAC or self._mac_menu is None:
+            return False
+        try:
+            win = event.window()
+            pt = event.locationInWindow()
+            if win is not None and hasattr(win, "convertPointToScreen_"):
+                screen_pt = win.convertPointToScreen_(pt)
+            else:
+                from AppKit import NSMakePoint
+                screen_pt = NSMakePoint(float(pt.x), float(pt.y))
+            self._mac_menu.popUpMenuPositioningItem_atLocation_inView_(
+                None, screen_pt, None
+            )
+            return True
+        except Exception as exc:
+            print(f"⚠️ 弹出菜单失败: {exc}")
+            return False
+
+    def _mac_status_button_image(self):
+        """菜单栏图标：多符号回退 + 字号，避免 Tahoe 上 symbol 缺失导致零宽度。"""
+        try:
+            from AppKit import NSImage, NSImageSymbolConfiguration
+        except ImportError:
+            return None
+        cfg = None
+        if hasattr(NSImageSymbolConfiguration, "configurationWithPointSize_weight_"):
+            try:
+                cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_(14.0, 0.0)
+            except Exception:
+                cfg = None
+        for name in ("cat.fill", "pawprint.fill", "hare.fill", "face.smiling"):
+            img = None
+            if cfg is not None and hasattr(
+                NSImage, "imageWithSystemSymbolName_accessibilityDescription_withConfiguration_"
+            ):
+                img = NSImage.imageWithSystemSymbolName_accessibilityDescription_withConfiguration_(
+                    name, "小猫桌宠", cfg
+                )
+            if img is None and hasattr(NSImage, "imageWithSystemSymbolName_accessibilityDescription_"):
+                img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    name, "小猫桌宠"
+                )
+            if img is not None:
+                img.setTemplate_(True)
+                return img
+        return None
+
+    def _configure_mac_status_item(self, item) -> None:
+        from AppKit import NSImageLeft
+
+        btn = item.button()
+        img = self._mac_status_button_image()
+        if btn is not None:
+            btn.setTitle_("猫")
+            if img is not None:
+                btn.setImage_(img)
+            btn.setImagePosition_(NSImageLeft)
+            btn.setToolTip_("小猫桌宠")
+        else:
+            item.setTitle_("猫")
+            if hasattr(item, "setHighlightMode_"):
+                item.setHighlightMode_(True)
+        name = getattr(self, "_mac_autosave_name", "cockroach.pet.menubar")
+        if hasattr(item, "setAutosaveName_"):
+            item.setAutosaveName_(name)
+        if hasattr(item, "setVisible_"):
+            item.setVisible_(True)
+
+    def _start_mac_status(self, quiet: bool = False) -> None:
         try:
             import objc  # noqa: F401 — 确保 PyObjC runtime
             from AppKit import NSStatusBar, NSVariableStatusItemLength
@@ -575,16 +760,24 @@ class DesktopChrome:
             print("⚠️ AppKit 不可用，跳过菜单栏")
             return
 
-        Target = _mac_status_target_type()
-        self._mac_target = Target.alloc().init()
-        self._mac_target._chrome = self
-        bar = NSStatusBar.systemStatusBar()
-        item = bar.statusItemWithLength_(NSVariableStatusItemLength)
-        item.setTitle_("🐱")
-        item.setHighlightMode_(True)
-        self._status_item = item
-        self._apply_mac_menu()
-        print("菜单栏: 点击 🐱 图标")
+        try:
+            Target = _mac_status_target_type()
+            self._mac_target = Target.alloc().init()
+            self._mac_target._chrome = self
+            bar = NSStatusBar.systemStatusBar()
+            item = bar.statusItemWithLength_(NSVariableStatusItemLength)
+            self._configure_mac_status_item(item)
+            self._status_item = item
+            self._apply_mac_menu()
+            if not quiet:
+                print("菜单栏: 点右上角「猫」或猫形图标（可能被 << 收起）")
+                print("   若无图标: 系统设置→菜单栏→打开 Terminal/Python；或 ⌘+⌥+点小猫")
+        except Exception as exc:
+            import traceback
+            print(f"⚠️ 菜单栏创建失败（桌宠仍可用）: {exc}")
+            traceback.print_exc()
+            self._status_item = None
+            self._mac_menu = None
 
     def _apply_mac_menu(self) -> None:
         from AppKit import NSMenu, NSMenuItem
@@ -646,6 +839,7 @@ class DesktopChrome:
             add_to(menu, "退出", "quit")
 
         self._status_item.setMenu_(menu)
+        self._mac_menu = menu
 
     def _build_win_menu(self):
         import pystray
