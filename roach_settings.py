@@ -18,20 +18,51 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "click_through_force": False,
     "follow_default": False,
     "global_hotkeys": True,
+    # 极简模式：菜单只留常用互动，其余进「更多」；快捷键也收窄
+    "simple_mode": True,
     "accountant_buddy": True,
     "buddy_banter_min": 120,
     "buddy_banter_max": 280,
+    # 月结应援：用户标记或自动识别高压日时，对喷降频并改鼓励话术
+    "buddy_support_mode": False,
+    "buddy_auto_support": True,
+    # 用户习惯的月结日（1–28）；0=未设置，仍用月初/月末启发式
+    "close_day": 0,
+    # 用户自选的月结忙碌窗口（1–31）；均为 0 表示未设，走 close_day / 月初月末启发式
+    "close_window_start_day": 0,
+    "close_window_end_day": 0,
     "idle_showcase": True,
-    "idle_showcase_min": 45,
-    "idle_showcase_max": 90,
+    # 屏幕自主移动/周期表演：引导可选 5/10/30/60 分钟，默认 5 分钟
+    "interaction_interval_sec": 300,
+    "idle_showcase_min": 270,
+    "idle_showcase_max": 330,
     "rest_reminder": True,
     "rest_reminder_interval_sec": 3600,
+    # 护眼/喝水/伸展：轻量气泡提醒，间隔可在 settings 改（秒）
+    "care_reminders": True,
+    "care_preset": "standard",  # gentle | standard | strict | custom
+    "care_eye_sec": 1200,       # 默认 20 分钟（20-20-20）
+    "care_water_sec": 1800,     # 默认 30 分钟
+    "care_stretch_sec": 2700,   # 默认 45 分钟
+    # 专注番茄钟：手动开倒计时，结束后猫跑来催休息（秒，默认 25 分）
+    "focus_pomodoro_sec": 1500,
+    # 无人操作时自主散步/发呆/瞌睡/攀爬/倒挂
+    "autonomy": True,
+    "autonomy_idle_sec": 45,
+    "autonomy_min": 270,
+    "autonomy_max": 330,
+    "autonomy_respect_focus": True,
+    # 会议/共享/投屏/截图：共享与投屏收起；截图热键躲闪；开会安静
+    "meeting_silence": True,
     # 鼠标长时间不动时，小猫跑去找指针互动
     "mouse_seek": True,
     "mouse_idle_sec": 1800,
     "mouse_seek_cooldown_sec": 900,
-    "enabled_packs": ["worker", "finance", "programmer", "accountant"],
+    "enabled_packs": ["worker", "finance", "programmer", "accountant", "wellness"],
     "skin": "default",
+    # 形象锁定：true 时下次启动用 appearance_slug，不再随机
+    "appearance_lock": False,
+    "appearance_slug": "",
     "ai": {
         "enabled": False,
         "provider": "deepseek",
@@ -78,6 +109,16 @@ DEFAULT_PROGRESS: dict[str, Any] = {
     "titles": [],
     "unlocked_skins": ["default"],
     "stats": {},
+    # 首次启动气泡引导是否完成（兼容旧键 onboarding_done）
+    "onboarding_completed": False,
+    "onboarding_done": False,
+    # 月结应援误判反馈：用于以后调日历/负载阈值
+    "support_feedback": [],
+    "support_fp_stats": {},
+    # 用户点「这次不是月结」后，自动应援抑制到此时刻（unix）
+    "support_dismiss_until": 0.0,
+    # 应援窗口已结束，等待下一次回家/睡觉做收工仪式
+    "support_close_pending": False,
 }
 
 ACHIEVEMENTS: list[dict[str, Any]] = [
@@ -115,6 +156,21 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def apply_interaction_interval(settings: dict[str, Any], sec: int | None = None) -> dict[str, Any]:
+    """写入互动间隔（秒）并同步自主散步/周期表演的随机窗口（±10%）。"""
+    if sec is None:
+        sec = int(settings.get("interaction_interval_sec") or 300)
+    sec = max(300, min(3600, int(sec)))
+    lo = max(60, int(sec * 0.9))
+    hi = max(lo + 1, int(sec * 1.1))
+    settings["interaction_interval_sec"] = sec
+    settings["autonomy_min"] = lo
+    settings["autonomy_max"] = hi
+    settings["idle_showcase_min"] = lo
+    settings["idle_showcase_max"] = hi
+    return settings
+
+
 def _load_secrets_overlay(app_dir: str) -> dict[str, Any]:
     """可选 secrets.json：仅覆盖 ai.providers.*.api_key 等敏感项，勿提交仓库。"""
     path = secrets_path(app_dir)
@@ -140,6 +196,14 @@ def load_settings(app_dir: str) -> dict[str, Any]:
         if not isinstance(raw, dict):
             return deepcopy(DEFAULT_SETTINGS)
         merged = _deep_merge(DEFAULT_SETTINGS, raw)
+        # 旧配置补上养生话术包（不覆盖用户其它包选择）
+        ep = merged.get("enabled_packs")
+        if isinstance(ep, list) and "wellness" not in ep:
+            merged["enabled_packs"] = list(ep) + ["wellness"]
+        if "interaction_interval_sec" not in raw:
+            apply_interaction_interval(merged, 300)
+        else:
+            apply_interaction_interval(merged, merged.get("interaction_interval_sec"))
         return _deep_merge(merged, _load_secrets_overlay(app_dir))
     except (OSError, json.JSONDecodeError):
         return deepcopy(DEFAULT_SETTINGS)
@@ -174,6 +238,25 @@ def load_progress(app_dir: str) -> dict[str, Any]:
         if not isinstance(raw, dict):
             return deepcopy(DEFAULT_PROGRESS)
         merged = _deep_merge(DEFAULT_PROGRESS, raw)
+        # 引导完成标记：优先 onboarding_completed，兼容 onboarding_done
+        if "onboarding_completed" in raw:
+            merged["onboarding_completed"] = bool(raw.get("onboarding_completed"))
+            merged["onboarding_done"] = merged["onboarding_completed"]
+        elif "onboarding_done" in raw:
+            merged["onboarding_completed"] = bool(raw.get("onboarding_done"))
+            merged["onboarding_done"] = merged["onboarding_completed"]
+        else:
+            # 旧进度无引导字段：有互动记录则视为已完成，避免老用户被突然引导
+            activity = (
+                int(raw.get("pet_count") or 0)
+                + int(raw.get("feed_count") or 0)
+                + int(raw.get("call_count") or 0)
+                + int(raw.get("banter_count") or 0)
+                + int(raw.get("story_count") or 0)
+            )
+            done = activity > 0 or bool(raw.get("titles"))
+            merged["onboarding_completed"] = done
+            merged["onboarding_done"] = done
         # 旧蟑螂称号 → 小猫称号
         rename = {
             "缝里挚友": "窗台挚友",

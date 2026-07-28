@@ -31,6 +31,13 @@ CATEGORY_KEYS = (
     "programmer_buzz",
     "festival",
     "chat",
+    "care_eye",
+    "care_water",
+    "care_stretch",
+    "care_rest",
+    "support_close",
+    "meeting_end",
+    "focus_done",
 )
 
 

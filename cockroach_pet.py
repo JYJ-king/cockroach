@@ -10,7 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum, auto
 
 IS_MAC = sys.platform == "darwin"
@@ -44,6 +44,7 @@ except ImportError:
 
 from phrase_packs import PACKS
 from roach_settings import (
+    apply_interaction_interval,
     evaluate_achievements,
     load_progress,
     load_settings,
@@ -51,13 +52,22 @@ from roach_settings import (
     save_settings,
 )
 from desktop_chrome import DesktopChrome
-from accountant_buddy import AccountantBuddy
+from accountant_buddy import AccountantBuddy, pick_banter_script
 from story_mode import (
+    CARE_EYE_PHRASES,
+    CARE_STRETCH_PHRASES,
+    CARE_WATER_PHRASES,
     CLICK_BANTER_PHRASES,
     POKE_BANTER_PHRASES,
+    REST_PHRASES,
     pick_rest_line,
     pick_showcase_line,
     pick_story,
+)
+from presence_guard import (
+    detect_presence,
+    routine_mode as _presence_routine_mode,
+    system_focus_active,
 )
 from llm_client import (
     PROVIDER_ORDER,
@@ -173,6 +183,13 @@ _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日
 # Windows 色键透明（品红底会被抠掉）
 _WIN_COLORKEY = (255, 0, 255)
 
+# 养生提醒节奏预设（秒）：护眼 / 喝水 / 伸展
+CARE_PRESETS: dict[str, dict[str, int]] = {
+    "gentle": {"eye": 1800, "water": 2400, "stretch": 3600},
+    "standard": {"eye": 1200, "water": 1800, "stretch": 2700},
+    "strict": {"eye": 900, "water": 1200, "stretch": 1800},
+}
+
 # macOS / Windows 中文字体（dummy SDL 下 SysFont 无法加载 CJK）
 _CJK_FONT_PATHS = (
     "/System/Library/Fonts/STHeiti Medium.ttc",
@@ -215,6 +232,11 @@ def greeting_by_period() -> str:
         "evening": "晚上好喵!",
         "night": "夜深了,该踩奶了~",
     }[period_of_day()]
+
+
+def routine_mode(respect_focus: bool = True, meeting_level: str = "") -> str:
+    """作息模式: active | quiet | sleepish（含跨平台专注 + 会议）。"""
+    return _presence_routine_mode(respect_focus=respect_focus, meeting_level=meeting_level)
 
 
 def date_phrase() -> str:
@@ -1180,37 +1202,6 @@ def refresh_net_sample() -> tuple[float, float]:
     return up, down
 
 
-def sample_system(interval_cpu: float = 0.15) -> dict | None:
-    """采集 CPU / 内存 / 磁盘 / 网络。失败返回 None。"""
-    if not PSUTIL_OK:
-        return None
-    try:
-        # 短间隔采样，气泡场景可接受
-        cpu = float(psutil.cpu_percent(interval=interval_cpu))
-        vm = psutil.virtual_memory()
-        disk = psutil.disk_usage(_disk_root())
-        up, down = refresh_net_sample()
-        # 再采一次让网速更稳（若首次）
-        if up == 0 and down == 0:
-            time.sleep(0.2)
-            up, down = refresh_net_sample()
-        return {
-            "cpu": cpu,
-            "mem_pct": float(vm.percent),
-            "mem_used": int(vm.used),
-            "mem_total": int(vm.total),
-            "disk_pct": float(disk.percent),
-            "disk_used": int(disk.used),
-            "disk_total": int(disk.total),
-            "disk_path": _disk_root(),
-            "net_up": up,
-            "net_down": down,
-            "cpu_count": int(psutil.cpu_count() or 0),
-        }
-    except Exception:
-        return None
-
-
 def format_cpu_line(s: dict | None = None) -> str:
     s = s or sample_system()
     if not s:
@@ -1299,37 +1290,134 @@ def canvas_to_nsimage(surface: pygame.Surface):
     return surface_to_nsimage(surface)
 
 
+_DESKTOP_SIZE_CACHE: tuple[float, tuple[int, int]] = (0.0, (1280, 800))
+_LOAD_SAMPLE_CACHE: tuple[float, dict | None] = (0.0, None)
+
+
 def get_desktop_size() -> tuple[int, int]:
+    """屏幕尺寸：缓存约 1 秒，避免每帧打 AppKit/WinAPI。"""
+    global _DESKTOP_SIZE_CACHE
+    now = time.time()
+    ts, cached = _DESKTOP_SIZE_CACHE
+    if now - ts < 1.0 and cached[0] > 0 and cached[1] > 0:
+        return cached
+
+    size = (1280, 800)
     if IS_MAC and OBJC_OK:
-        f = NSScreen.mainScreen().frame()
-        return int(f.size.width), int(f.size.height)
-    if IS_WIN:
+        try:
+            f = NSScreen.mainScreen().frame()
+            size = (int(f.size.width), int(f.size.height))
+        except Exception:
+            size = cached if cached[0] > 0 else size
+    elif IS_WIN:
         try:
             import ctypes
             user32 = ctypes.windll.user32
-            # 虚拟桌面（多屏总宽高）；单屏时与主屏一致
             SM_CXVIRTUALSCREEN = 78
             SM_CYVIRTUALSCREEN = 79
             vw = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
             vh = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
             if vw > 0 and vh > 0:
-                return vw, vh
-            return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+                size = (vw, vh)
+            else:
+                size = (int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1)))
+        except Exception:
+            size = cached if cached[0] > 0 else size
+    else:
+        try:
+            if pygame.display.get_init():
+                info = pygame.display.Info()
+                if info.current_w > 0 and info.current_h > 0:
+                    size = (int(info.current_w), int(info.current_h))
         except Exception:
             pass
-    # 回退：pygame 显示器信息
+    _DESKTOP_SIZE_CACHE = (now, size)
+    return size
+
+
+def sample_load_light(max_age: float = 2.5) -> dict | None:
+    """轻量 CPU/内存采样（带缓存），供应援门控用，绝不 sleep。"""
+    global _LOAD_SAMPLE_CACHE
+    now = time.time()
+    ts, cached = _LOAD_SAMPLE_CACHE
+    if cached is not None and now - ts < max_age:
+        return cached
+    if not PSUTIL_OK:
+        return None
     try:
-        if pygame.display.get_init():
-            info = pygame.display.Info()
-            if info.current_w > 0 and info.current_h > 0:
-                return int(info.current_w), int(info.current_h)
+        info = {
+            "cpu": float(psutil.cpu_percent(interval=0.0)),
+            "mem_pct": float(psutil.virtual_memory().percent),
+        }
+        _LOAD_SAMPLE_CACHE = (now, info)
+        return info
     except Exception:
-        pass
-    return 1280, 800
+        return cached
+
+
+def sample_system(interval_cpu: float = 0.15) -> dict | None:
+    """采集 CPU / 内存 / 磁盘 / 网络。失败返回 None。主循环勿用 interval>0。"""
+    if not PSUTIL_OK:
+        return None
+    try:
+        # 短间隔采样；主线程请传 interval=0，避免卡住动画
+        cpu = float(psutil.cpu_percent(interval=interval_cpu))
+        vm = psutil.virtual_memory()
+        disk = psutil.disk_usage(_disk_root())
+        up, down = refresh_net_sample()
+        # 首次网速为 0 时不再 sleep：会冻住桌宠主循环
+        return {
+            "cpu": cpu,
+            "mem_pct": float(vm.percent),
+            "mem_used": int(vm.used),
+            "mem_total": int(vm.total),
+            "disk_pct": float(disk.percent),
+            "disk_used": int(disk.used),
+            "disk_total": int(disk.total),
+            "disk_path": _disk_root(),
+            "net_up": up,
+            "net_down": down,
+            "cpu_count": int(psutil.cpu_count() or 0),
+        }
+    except Exception:
+        return None
 
 
 def surface_to_nsimage(surface: pygame.Surface):
-    """pygame Surface → NSImage（经 PNG 内存，不做垂直翻转）。"""
+    """pygame Surface → NSImage。优先原始像素，避免每帧 PNG 编码卡顿。"""
+    try:
+        import ctypes
+        from AppKit import NSBitmapImageRep, NSImage, NSDeviceRGBColorSpace
+
+        src = surface.convert_alpha()
+        w, h = src.get_size()
+        tobytes = getattr(pygame.image, "tobytes", None) or pygame.image.tostring
+        raw = tobytes(src, "RGBA")
+        rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+            None,
+            w,
+            h,
+            8,
+            4,
+            True,
+            False,
+            NSDeviceRGBColorSpace,
+            w * 4,
+            32,
+        )
+        dest = rep.bitmapData()
+        if dest is not None:
+            try:
+                ctypes.memmove(dest, raw, min(len(raw), w * h * 4))
+            except TypeError:
+                ctypes.memmove(int(dest), raw, min(len(raw), w * h * 4))
+            img = NSImage.alloc().initWithSize_((float(w), float(h)))
+            img.addRepresentation_(rep)
+            if img is not None:
+                return img
+    except Exception:
+        pass
+    # 回退：PNG（慢，仅应急）
     import io
 
     buf = io.BytesIO()
@@ -1364,8 +1452,10 @@ class State(Enum):
     FORAGE = auto()    # 沿边打猎 / 追毛线
     ZOOMIE = auto()    # 短暂疯跑
     PANIC = auto()     # 炸毛乱窜
-    POSE = auto()      # 摆拍定格
+    POSE = auto()      # 摆拍定格 / 发呆
     CALL = auto()      # 被召唤靠近
+    CLIMB = auto()     # 自主攀爬到屏幕上沿
+    HANG = auto()      # 倒挂在屏幕边缘
 
 
 class Bubble:
@@ -1392,9 +1482,39 @@ class Bubble:
     POSE_PHRASES = ["茄子~", "拍好看点", "我帅吗?", "定格!", "今日份猫片"]
     CALL_PHRASES = ["来了来了", "叫我?", "马上到", "干嘛呀", "喵!"]
     ZOOMIE_PHRASES = ["疯了!", "Zoom!", "半夜跑酷!", "停不下来", "电光猫!"]
+    STROLL_PHRASES = ["溜达溜达", "巡房中", "去那边看看", "走走停停", "晒爪爪"]
+    DAYDREAM_PHRASES = ["发呆中...", "在想小鱼干", "放空~", "盯着空气", "喵?"]
+    NAP_PHRASES = ["眯一会儿", "Zzz", "别吵我睡", "窗台好困", "再睡五分钟"]
+    CLIMB_PHRASES = ["往上爬!", "天花板呢?", "攀岩喵", "到顶了吗", "抓抓边缘"]
+    HANG_PHRASES = ["倒挂快乐", "我是蝙蝠猫", "掉不下去!", "边缘挂机", "头朝下~"]
     PEEK_PHRASES = ["谁在那?", "张望一下", "安全吗?", "伸脖子~", "鸟呢?"]
     KNEAD_PHRASES = ["踩奶中...", "软软的", "呼噜大作", "幸福!", "面团启动"]
     LOAF_PHRASES = ["面团模式", "收起爪子", "烤猫面包", "能量填充中", "别吵"]
+    # 月结应援窗口结束后，第一次回家/睡觉的收工庆祝
+    SUPPORT_CLOSE_PHRASES = [
+        "月结收工啦!",
+        "账平了·伸个懒腰",
+        "辛苦了·今晚可以睡",
+        "关账快乐喵",
+        "这一轮过完了!",
+        "礼花给你·好好歇",
+        "应援下岗·你超棒",
+        "收工仪式启动!",
+    ]
+    MEETING_END_PHRASES = [
+        "辛苦啦,开完了?",
+        "会开完啦·伸个懒腰",
+        "散会快乐喵",
+        "开完了?喝口水",
+        "会议下岗·你真棒",
+    ]
+    FOCUS_DONE_PHRASES = [
+        "番茄到啦·起来晃晃",
+        "专注收工·伸个懒腰",
+        "25分到了,陪你歇歇",
+        "蹲守结束·该休息了",
+        "深度工作收工喵",
+    ]
     GROOM_PHRASES = ["理毛中...", "舔舔", "仪表很重要", "顺一顺", "光洁如新"]
     POUNCE_PHRASES = ["扑击!", "锁定目标", "起飞!", "逮到你!", "暗杀猫"]
     BOX_PHRASES = ["纸箱是家", "钻进去!", "外面消失了", "喵窝+1", "别拆快递"]
@@ -1451,20 +1571,37 @@ class BubbleQueue:
 
 
 class FxParticle:
-    """短促视觉反馈：爱心 / 碎屑 / 星星，替代频繁说话。"""
+    """短促视觉反馈：爱心 / 碎屑 / 星星 / 礼花，替代频繁说话。"""
+
+    _CONFETTI_COLORS = (
+        (255, 90, 120),
+        (255, 200, 60),
+        (120, 200, 255),
+        (160, 255, 140),
+        (255, 150, 255),
+        (255, 140, 80),
+    )
 
     def __init__(self, x, y, kind: str = "heart"):
         self.x, self.y = float(x), float(y)
-        self.vx = random.uniform(-1.2, 1.2)
-        self.vy = random.uniform(-2.5, -0.8)
-        self.life = random.randint(28, 48)
         self.kind = kind
-        self.size = random.randint(3, 6)
+        if kind == "confetti":
+            self.vx = random.uniform(-2.8, 2.8)
+            self.vy = random.uniform(-4.2, -1.2)
+            self.life = random.randint(42, 72)
+            self.size = random.randint(2, 5)
+            self.color = random.choice(self._CONFETTI_COLORS)
+        else:
+            self.vx = random.uniform(-1.2, 1.2)
+            self.vy = random.uniform(-2.5, -0.8)
+            self.life = random.randint(28, 48)
+            self.size = random.randint(3, 6)
+            self.color = (255, 220, 80)
 
     def tick(self) -> bool:
         self.x += self.vx
         self.y += self.vy
-        self.vy += 0.08
+        self.vy += 0.08 if self.kind != "confetti" else 0.11
         self.life -= 1
         return self.life > 0
 
@@ -1613,6 +1750,36 @@ def pick_random_appearance() -> dict:
     return random.choice(apps)
 
 
+def appearance_by_slug(slug: str | None) -> dict | None:
+    """按 slug 查找形象；找不到返回 None。"""
+    want = (slug or "").strip()
+    if not want:
+        return None
+    for app in list_cat_appearances():
+        if str(app.get("slug") or "") == want:
+            return dict(app)
+    if want == CLASSIC_APPEARANCE["slug"]:
+        return dict(CLASSIC_APPEARANCE)
+    return None
+
+
+def resolve_startup_appearance(settings: dict) -> dict:
+    """启动时选形象：锁定则用已存 slug，否则随机。"""
+    locked = bool(settings.get("appearance_lock", False))
+    slug = str(settings.get("appearance_slug") or "").strip()
+    if locked and slug:
+        found = appearance_by_slug(slug)
+        if found:
+            return found
+        print(f"⚠️ 锁定形象未找到({slug})，改随机")
+    return pick_random_appearance()
+
+
+def appearance_label(app: dict | None) -> str:
+    app = app or {}
+    return str(app.get("name_zh") or app.get("name") or app.get("slug") or "小猫")
+
+
 def load_codex_spritesheet(
     path: str,
     width: int = SPRITE_W,
@@ -1697,14 +1864,14 @@ def cat_anim_for_state(state: "State", moving: bool, hide_settled: bool = False)
     if state in (
         State.WALK, State.RUN, State.ZOOMIE, State.FOLLOW,
         State.SCARED, State.PANIC, State.CALL, State.FORAGE,
-        State.LASER, State.DRAGGED,
+        State.LASER, State.DRAGGED, State.CLIMB,
     ):
         return "running"
     if state == State.HIDE:
         return "waiting" if hide_settled else "idle"
     if state in (State.GREET, State.HAPPY, State.DANCE):
         return "waving"
-    if state in (State.CURIOUS, State.PEEK, State.BELLY, State.SLEEP):
+    if state in (State.CURIOUS, State.PEEK, State.BELLY, State.SLEEP, State.HANG):
         return "waiting"
     if state in (State.POSE, State.SPIN):
         return "review"
@@ -1740,6 +1907,7 @@ class RoachRenderer:
         self.target_alpha = 255
         self.happy = False
         self.belly = False
+        self.hanging = False  # 倒挂：竖直翻转
         self.gait = 0.0
         self.gait_amp = 0.0
         self.particles: list[FxParticle] = []
@@ -1803,6 +1971,17 @@ class RoachRenderer:
         else:
             self.base = load_roach_sprite(SPRITE_W, skin=skin)
         self.sw, self.sh = self.base.get_size()
+
+    def apply_appearance(self, appearance: dict):
+        """运行时切换猫形象（保留当前 tint 皮肤）。"""
+        self.appearance = dict(appearance or CLASSIC_APPEARANCE)
+        self.anim_override = None
+        self._fi = 0
+        self._accum = 0
+        self.base = self._load_visuals(self.skin)
+        self.sw, self.sh = self.base.get_size()
+        if self.use_cat and "idle" in self.clips:
+            self.play("idle")
 
     def force_anim(self, name: str, duration_sec: float = 4.0):
         """临时强制某动作（故事/对喷等）。"""
@@ -1925,7 +2104,7 @@ class RoachRenderer:
         bw = max(1, int(self.sw * s))
         bh = max(1, int(self.sh * s))
         img = self.base
-        if self.belly:
+        if self.belly or self.hanging:
             img = pygame.transform.flip(img, False, True)
         # Running 朝右；朝左时水平翻转
         if self.use_cat and self.anim in CAT_SIDE_ANIMS and self.facing < 0:
@@ -1956,7 +2135,9 @@ class RoachRenderer:
     ):
         s = self.scale
         cx = ox + PET_W / 2
-        cy = oy + PET_H / 2 + self.bob
+        # 倒挂时略上移，看起来挂在屏幕边缘
+        hang_bias = -10 if self.hanging else 0
+        cy = oy + PET_H / 2 + self.bob + hang_bias
 
         if self.alpha >= 1:
             local = self._compose_local(s, moving)
@@ -1993,6 +2174,15 @@ class RoachRenderer:
                 col = (255, 90, 120, a)
             elif p.kind == "crumb":
                 col = (180, 120, 60, a)
+            elif p.kind == "confetti":
+                r, g, b = getattr(p, "color", (255, 220, 80))
+                col = (r, g, b, a)
+                pygame.draw.rect(
+                    surf,
+                    col,
+                    (int(p.x), int(p.y), max(2, p.size), max(2, p.size - 1)),
+                )
+                continue
             elif p.kind == "star":
                 col = (255, 220, 80, a)
             else:
@@ -2154,6 +2344,58 @@ class PetBrain:
     def react_call(self):
         self.pet_streak = 0
         self._set(State.CALL, random.randint(160, 240))
+
+    def react_stroll(self):
+        """自主散步。"""
+        self.pet_streak = 0
+        self.follow = False
+        self._pick_target()
+        self._set(State.WALK, random.randint(160, 280))
+
+    def react_daydream(self):
+        """原地发呆。"""
+        self.pet_streak = 0
+        self.vx = self.vy = 0
+        self.target_x = self.target_y = None
+        self._set(State.POSE, random.randint(160, 260))
+
+    def react_nap(self):
+        """自主打瞌睡（与右键睡共用 SLEEP）。"""
+        self.pet_streak = 0
+        self.vx = self.vy = 0
+        self.target_x = self.target_y = None
+        self._set(State.SLEEP, random.randint(360, 720))
+
+    def _pick_top_edge(self):
+        """攀爬/倒挂目标：屏幕上沿。"""
+        self.target_x = float(self._rand_coord(20, self.sw - self.pw))
+        self.target_y = 8.0
+
+    def _pick_hang_spot(self):
+        """倒挂点：顶边或左右上角。"""
+        choice = random.random()
+        if choice < 0.4:
+            self.target_x = 12.0
+            self.target_y = 8.0
+        elif choice < 0.8:
+            self.target_x = float(max(12, self.sw - self.pw - 12))
+            self.target_y = 8.0
+        else:
+            self._pick_top_edge()
+
+    def react_climb(self):
+        """向屏幕上沿攀爬。"""
+        self.pet_streak = 0
+        self.follow = False
+        self._pick_top_edge()
+        self._set(State.CLIMB, random.randint(220, 360))
+
+    def react_hang(self):
+        """爬到边缘后倒挂一阵。"""
+        self.pet_streak = 0
+        self.follow = False
+        self._pick_hang_spot()
+        self._set(State.HANG, random.randint(260, 420))
 
     def react_follow_toggle(self) -> bool:
         self.follow = not self.follow
@@ -2364,6 +2606,40 @@ class PetBrain:
                 self._rest()
             self.energy = max(0, self.energy - 0.02)
 
+        elif self.state == State.CLIMB:
+            sp = WALK_SPEED * 0.95
+            if self.target_x is not None and self.target_y is not None:
+                dx = self.target_x - px
+                dy = self.target_y - py
+                d = math.hypot(dx, dy)
+                if d < 10:
+                    self.vx = self.vy = 0
+                    # 到顶后趴一会儿再回窝
+                    if self.state_timer > 90:
+                        self.state_timer = random.randint(50, 90)
+                    elif self.state_timer <= 0:
+                        self._rest()
+                else:
+                    self.vx, self.vy = dx / d * sp, dy / d * sp
+            elif self.state_timer <= 0:
+                self._rest()
+            self.energy = max(0, self.energy - 0.025)
+
+        elif self.state == State.HANG:
+            sp = WALK_SPEED * 1.05
+            if self.target_x is not None and self.target_y is not None:
+                dx = self.target_x - px
+                dy = self.target_y - py
+                d = math.hypot(dx, dy)
+                if d < 10:
+                    self.vx = self.vy = 0
+                    if self.state_timer <= 0:
+                        self._rest()
+                else:
+                    self.vx, self.vy = dx / d * sp, dy / d * sp
+            elif self.state_timer <= 0:
+                self._rest()
+
         elif self.state == State.IDLE:
             self.vx *= 0.85
             self.vy *= 0.85
@@ -2486,7 +2762,11 @@ class RoachPet:
         unlocked = set(self.progress.get("unlocked_skins") or ["default"])
         if skin not in unlocked and skin not in ("default", "gold", "ghost"):
             skin = "default"
-        self.appearance = pick_random_appearance()
+        self.appearance = resolve_startup_appearance(self.settings)
+        # 未锁定时也记下本次 slug，方便用户一键锁定当前
+        slug = str(self.appearance.get("slug") or "")
+        if slug and not self.settings.get("appearance_lock"):
+            self.settings["appearance_slug"] = slug
         self.roach = RoachRenderer(skin=skin, appearance=self.appearance)
         self.roach.fade = False  # 小猫始终清晰，不做半透明淡化
         self.roach.target_alpha = 255
@@ -2520,14 +2800,53 @@ class RoachPet:
         self._cmd_q: queue.Queue[str] = queue.Queue()
         self._last_hour_chime = -1
         self._worker_fired: set[str] = set()
-        self._next_proactive = time.time() + 180
+        iv = float(self.settings.get("interaction_interval_sec") or 300)
+        self._next_proactive = time.time() + random.uniform(iv * 1.2, iv * 2.0)
         self._next_worker_idle = time.time() + 300
-        lo_sc = float(self.settings.get("idle_showcase_min") or 45)
-        hi_sc = float(self.settings.get("idle_showcase_max") or 90)
+        lo_sc = float(self.settings.get("idle_showcase_min") or iv * 0.9)
+        hi_sc = float(self.settings.get("idle_showcase_max") or iv * 1.1)
         self._next_showcase = time.time() + random.uniform(min(lo_sc, hi_sc), max(lo_sc, hi_sc))
         rest_iv = float(self.settings.get("rest_reminder_interval_sec") or 3600)
         self._next_rest = time.time() + max(60.0, rest_iv)
         self._rest_active = False
+        self._guide_step = -1
+        self._guide_step_at = 0.0
+        self._guide_armed_at = 0.0
+        self._guide_gap_until = 0.0
+        self._guide_after_gap: str | None = None  # "next" | "finish"
+        self._guide_choices: list[dict] = []
+        self._guide_btn_rects: list[tuple[pygame.Rect, str]] = []
+        self._guide_lines: list[str] = []
+        self._guide_idle_skips = 0  # 连续超时跳过次数，满 3 直接收尾
+        # 护眼/喝水/伸展：错开首次触发，避免扎堆
+        now0 = time.time()
+        self._next_care = {
+            "eye": now0 + max(90.0, float(self.settings.get("care_eye_sec") or 1200) * 0.35),
+            "water": now0 + max(120.0, float(self.settings.get("care_water_sec") or 1800) * 0.4),
+            "stretch": now0 + max(150.0, float(self.settings.get("care_stretch_sec") or 2700) * 0.45),
+        }
+        # 自主行为：无人操作一段时间后自己散步/发呆/睡觉/攀爬/倒挂
+        self._last_user_act = time.time()
+        lo_au = float(self.settings.get("autonomy_min") or iv * 0.9)
+        hi_au = float(self.settings.get("autonomy_max") or iv * 1.1)
+        self._next_autonomy = time.time() + random.uniform(min(lo_au, hi_au), max(lo_au, hi_au))
+        # 会议/投屏/截图静默：共享与投屏收起；截图热键即时躲闪
+        self._stealth = False
+        self._stealth_reason = ""
+        self._meeting_level = ""
+        self._casting = False
+        self._shot_tool = False
+        self._shot_hide_until = 0.0
+        self._stealth_clear_at = 0.0
+        self._next_meeting_check = 0.0
+        # 会议结束彩蛋：开会/共享持续一段时间后落下
+        self._meeting_busy = False
+        self._meeting_since = 0.0
+        self._meeting_end_egg_at = 0.0
+        self._meeting_end_egg_pending = False
+        # 专注番茄钟：手动倒计时，期间安静蹲守，结束跑来催休息
+        self._focus_until = 0.0
+        self._focus_end_pending = False
         lo = float(self.settings.get("sys_check_interval_min") or 50)
         hi = float(self.settings.get("sys_check_interval_max") or 90)
         self._next_sys_check = time.time() + random.uniform(lo, hi)
@@ -2549,9 +2868,20 @@ class RoachPet:
         self._chrome = None
         self.buddy = None
         self._next_banter = time.time() + random.uniform(90, 160)
+        # 月结应援：负载触发的短时保持 / 用户误判反馈后的当日抑制
+        self._support_hold_until = 0.0
+        self._support_hold_reason = ""
+        self._support_dismiss_until = float(self.progress.get("support_dismiss_until") or 0)
+        # 应援收工仪式：窗口结束后，等第一次回家/睡觉
+        self._support_was_active = False
+        self._support_worthy = False
+        self._support_skip_close = False
+        self._support_watch_ready = False
+        self._next_support_watch = 0.0
         # Windows：快捷键不依赖窗口焦点（鼠标在猫上 / 刚点过即可）
         self._pointer_over_pet = False
         self._win_keys_until = 0.0
+        self._mac_last_origin: tuple[int, int] | None = None
 
         if IS_MAC:
             if not OBJC_OK:
@@ -2572,6 +2902,338 @@ class RoachPet:
         self._start_weather_fetch()
         self._queue_startup_greetings()
         self.tick()
+
+    def _onboarding_done(self) -> bool:
+        return bool(
+            self.progress.get("onboarding_completed")
+            or self.progress.get("onboarding_done")
+        )
+
+    def _guide_active(self) -> bool:
+        """引导进行中（含开场等待、步骤、呼吸间隔）。"""
+        return self._guide_step >= -2 and self._guide_step != -1
+
+    def _guide_steps(self) -> list[dict]:
+        return [
+            {
+                "id": "welcome",
+                "lines": [
+                    "喵~我是你的新桌宠。",
+                    "会陪你打工,也会在月结时站你这边。",
+                    "要花20秒设置一下吗?",
+                ],
+                "choices": [
+                    {"id": "setup", "label": "好,设置一下"},
+                    {"id": "skip_all", "label": "直接开始玩"},
+                ],
+            },
+            {
+                "id": "close_window",
+                "lines": [
+                    "你们大概几号到几号最忙/月结?",
+                    "到时候我会少吵你,多陪你。",
+                ],
+                "choices": [
+                    {"id": "early", "label": "月初1-5"},
+                    {"id": "late", "label": "月末25-31"},
+                    {"id": "mid", "label": "月中10-15"},
+                    {"id": "skip", "label": "不用,随缘"},
+                ],
+            },
+            {
+                "id": "care",
+                "lines": [
+                    "护眼喝水伸展,希望我催得多勤?",
+                ],
+                "choices": [
+                    {"id": "gentle", "label": "温和点"},
+                    {"id": "standard", "label": "标准"},
+                    {"id": "strict", "label": "严格点"},
+                    {"id": "off", "label": "先别催我"},
+                ],
+            },
+            {
+                "id": "interaction",
+                "lines": [
+                    "我多久在屏幕上动一动?",
+                    "不选的话默认大概5分钟一次。",
+                ],
+                "choices": [
+                    {"id": "5m", "label": "5分钟"},
+                    {"id": "10m", "label": "10分钟"},
+                    {"id": "30m", "label": "30分钟"},
+                    {"id": "1h", "label": "1小时"},
+                ],
+            },
+            {
+                "id": "appearance",
+                "lines": [
+                    "我今天随机换了个样子。",
+                    "喜欢就锁定,不然每次开机都会换。",
+                ],
+                "choices": [
+                    {"id": "lock", "label": "就要这只"},
+                    {"id": "random", "label": "随缘换"},
+                ],
+            },
+        ]
+
+    def _start_onboarding(self) -> None:
+        """首次启动轻量气泡引导：可点按钮跳过，非强制弹窗。"""
+        self._guide_step = -2  # 启动后约 2 秒再破冰
+        self._guide_armed_at = time.time() + 2.0
+        self._guide_gap_until = 0.0
+        self._guide_after_gap = None
+        self._guide_choices = []
+        self._guide_btn_rects = []
+        self._guide_lines = []
+        self._guide_idle_skips = 0
+        self._guide_step_at = time.time()
+        self.brain._set(State.GREET, 360)
+        self.roach.target_alpha = 255
+        self.roach.force_anim("waving", 4.0)
+        print("首次引导: 气泡按钮可选，8秒无操作自动跳过；可随时干活")
+
+    def _show_guide_step(self) -> None:
+        steps = self._guide_steps()
+        if self._guide_step < 0:
+            return
+        if self._guide_step >= len(steps):
+            self._begin_guide_finish()
+            return
+        self._guide_step_at = time.time()
+        self._guide_gap_until = 0.0
+        self._guide_after_gap = None
+        step = steps[self._guide_step]
+        self._guide_lines = list(step.get("lines") or [])
+        self._guide_choices = list(step.get("choices") or [])
+        self._guide_btn_rects = []
+        # 主气泡队列留给答谢短句；步骤文案由引导层绘制
+        self.bubbles.clear()
+        self.bubble = None
+        self.fx("star", 2)
+
+    def _schedule_guide_gap(self, after: str) -> None:
+        """答完一步后喘口气再问下一步。"""
+        self._guide_choices = []
+        self._guide_btn_rects = []
+        self._guide_after_gap = after
+        self._guide_gap_until = time.time() + random.uniform(4.0, 5.5)
+
+    def _on_guide_choice(self, choice_id: str) -> None:
+        if self._guide_step < 0 or self._guide_gap_until > time.time():
+            return
+        steps = self._guide_steps()
+        if self._guide_step >= len(steps):
+            return
+        step_id = steps[self._guide_step]["id"]
+        self._guide_idle_skips = 0
+        reply = ""
+        finish_all = False
+
+        if step_id == "welcome":
+            if choice_id == "skip_all":
+                finish_all = True
+                reply = "好,那就直接玩~"
+            else:
+                reply = "行,问你几个小事"
+        elif step_id == "close_window":
+            if choice_id == "early":
+                self._set_close_window(1, 5)
+                reply = "记下了,到时候我会乖一点"
+            elif choice_id == "late":
+                self._set_close_window(25, 31)
+                reply = "记下了,到时候我会乖一点"
+            elif choice_id == "mid":
+                self._set_close_window(10, 15)
+                reply = "记下了,到时候我会乖一点"
+            else:
+                reply = "那我先靠猜的,不准你再告诉我"
+        elif step_id == "care":
+            if choice_id in ("gentle", "standard", "strict"):
+                self._apply_care_preset(choice_id, announce=False)
+                names = {"gentle": "温和", "standard": "标准", "strict": "勤催"}
+                reply = f"养生={names.get(choice_id, choice_id)},收到"
+            else:
+                self.settings["care_reminders"] = False
+                self.settings["rest_reminder"] = False
+                save_settings(self.app_root, self.settings)
+                self._rest_active = False
+                reply = "好,那我先闭嘴,想开了随时在菜单找我"
+        elif step_id == "interaction":
+            presets = {"5m": 300, "10m": 600, "30m": 1800, "1h": 3600}
+            sec = presets.get(choice_id, 300)
+            apply_interaction_interval(self.settings, sec)
+            save_settings(self.app_root, self.settings)
+            lo = float(self.settings["autonomy_min"])
+            hi = float(self.settings["autonomy_max"])
+            gap = random.uniform(min(lo, hi), max(lo, hi))
+            self._next_autonomy = time.time() + gap
+            self._next_showcase = time.time() + gap
+            labels = {"5m": "5分钟", "10m": "10分钟", "30m": "30分钟", "1h": "1小时"}
+            reply = f"好,大概{labels.get(choice_id, '5分钟')}动一次"
+        elif step_id == "appearance":
+            if choice_id == "lock":
+                slug = str((self.appearance or {}).get("slug") or "")
+                self.settings["appearance_lock"] = True
+                if slug:
+                    self.settings["appearance_slug"] = slug
+                save_settings(self.app_root, self.settings)
+                reply = "好嘞,以后每次都是我"
+            else:
+                self.settings["appearance_lock"] = False
+                save_settings(self.app_root, self.settings)
+                reply = "那就每次给你个惊喜"
+
+        self._guide_lines = []
+        if reply:
+            self.bubbles.clear()
+            self.say(reply, urgent=True, life=120)
+            self.fx("heart", 3)
+
+        if finish_all:
+            self._schedule_guide_gap("finish")
+        elif self._guide_step >= len(steps) - 1:
+            self._schedule_guide_gap("finish")
+        else:
+            self._schedule_guide_gap("next")
+
+    def _skip_guide_step_idle(self) -> None:
+        """8 秒无操作：按默认跳过当前步，不改用户偏好（欢迎步则直接收尾）。"""
+        if self._guide_step < 0:
+            return
+        steps = self._guide_steps()
+        if self._guide_step >= len(steps):
+            self._begin_guide_finish()
+            return
+        step_id = steps[self._guide_step]["id"]
+        self._guide_idle_skips += 1
+        self._guide_lines = []
+        self._guide_choices = []
+        self._guide_btn_rects = []
+        if step_id == "welcome" or self._guide_idle_skips >= 3:
+            self.say("先玩着,设置随时在菜单里", urgent=True, life=120)
+            self._schedule_guide_gap("finish")
+            return
+        self._schedule_guide_gap("next")
+
+    def _set_close_window(self, start: int, end: int) -> None:
+        self.settings["close_window_start_day"] = int(start)
+        self.settings["close_window_end_day"] = int(end)
+        # 兼容旧逻辑：用窗口中点当 close_day
+        mid = (int(start) + int(end)) // 2
+        self.settings["close_day"] = max(1, min(28, mid))
+        save_settings(self.app_root, self.settings)
+
+    def _begin_guide_finish(self) -> None:
+        """结束语 + 财务彩蛋，然后落盘永不再问。"""
+        self._guide_step = -1
+        self._guide_choices = []
+        self._guide_btn_rects = []
+        self._guide_lines = []
+        self._guide_gap_until = 0.0
+        self._guide_after_gap = None
+        self.progress["onboarding_completed"] = True
+        self.progress["onboarding_done"] = True
+        save_progress(self.app_root, self.progress)
+        self.bubbles.clear()
+        self.bubbles.push_many(
+            [
+                "设置好啦,我先趴窝了。",
+                "想改随时点菜单「更多设置」,忙起来直接无视我就行~",
+                "对了,月结/审计/报销找我,我懂行话(按5-0或菜单里找)。",
+            ],
+            life=150,
+        )
+        self.fx("heart", 4)
+        self.brain.go_hide(scramble=False)
+        self.roach.force_anim("waiting", 6.0)
+
+    def _finish_onboarding(self) -> None:
+        self._begin_guide_finish()
+
+    def replay_onboarding(self) -> None:
+        """菜单重新开始引导。"""
+        self.progress["onboarding_completed"] = False
+        self.progress["onboarding_done"] = False
+        save_progress(self.app_root, self.progress)
+        self._start_onboarding()
+
+    def _check_onboarding_timeout(self) -> None:
+        now = time.time()
+        # 开场延迟破冰
+        if self._guide_step == -2:
+            if now >= float(self._guide_armed_at or 0):
+                self._guide_step = 0
+                self._show_guide_step()
+            return
+        if self._guide_step < 0:
+            return
+        # 呼吸间隔：答完后再出下一步
+        if self._guide_gap_until > 0:
+            if now < self._guide_gap_until:
+                return
+            after = self._guide_after_gap or "next"
+            self._guide_gap_until = 0.0
+            self._guide_after_gap = None
+            if after == "finish":
+                self._begin_guide_finish()
+            else:
+                self._guide_step += 1
+                if self._guide_step >= len(self._guide_steps()):
+                    self._begin_guide_finish()
+                else:
+                    self._show_guide_step()
+            return
+        # 当前步 8 秒无点 → 跳过
+        if self._guide_choices and now - float(self._guide_step_at or 0) >= 8.0:
+            self._skip_guide_step_idle()
+
+    def _queue_startup_greetings(self):
+        # 首次引导优先，不塞一堆日常气泡
+        if not self._onboarding_done():
+            self._start_onboarding()
+            return
+        label = appearance_label(getattr(self, "appearance", None))
+        if self.settings.get("bubbles_enabled", True):
+            tip = f"{greeting_by_period()} {date_phrase()}"
+            self.bubbles.push(tip, life=160)
+            if self.settings.get("appearance_lock"):
+                self.bubbles.push(f"固定形象:{label}", life=140)
+            else:
+                self.bubbles.push(f"今日形象:{label}", life=140)
+            if self.settings.get("simple_mode", True):
+                self.bubbles.push("极简模式·菜单点互动即可", life=120)
+            if self._buddy_support_active() and self.settings.get("accountant_buddy", True):
+                reason = "已标记月结" if self.settings.get("buddy_support_mode") else "高压日应援"
+                self.bubbles.push(f"会计猫:{reason}", life=130)
+            if is_workday():
+                self.bubbles.push(worker_startup_tip(), life=140)
+        # 挥爪打个招呼，随后回窗台趴窝
+        self.brain._set(State.GREET, 100)
+        self.roach.target_alpha = 255
+        self.roach.force_anim("waving", 3.0)
+
+    def _apply_care_preset(self, name: str, announce: bool = True) -> None:
+        vals = CARE_PRESETS.get(name) or CARE_PRESETS["standard"]
+        self.settings["care_preset"] = name
+        self.settings["care_eye_sec"] = int(vals["eye"])
+        self.settings["care_water_sec"] = int(vals["water"])
+        self.settings["care_stretch_sec"] = int(vals["stretch"])
+        self.settings["care_reminders"] = True
+        save_settings(self.app_root, self.settings)
+        now = time.time()
+        self._next_care = {
+            "eye": now + max(60.0, vals["eye"] * 0.25),
+            "water": now + max(90.0, vals["water"] * 0.3),
+            "stretch": now + max(120.0, vals["stretch"] * 0.35),
+        }
+        if announce:
+            self.say(
+                f"养生节奏:{name} 眼{vals['eye']//60}分/水{vals['water']//60}分/伸{vals['stretch']//60}分",
+                urgent=True,
+                life=170,
+            )
 
     def _init_buddy(self):
         """创建会计猫同伴（默认开启，可设置关闭）。"""
@@ -2647,16 +3309,18 @@ class RoachPet:
         self._win_apply_pos()
 
     def do_banter(self):
-        """手动触发一次主宠 vs 会计猫对喷。"""
+        """手动触发一次主宠 vs 会计猫对喷（高压日自动改鼓励语气）。"""
+        support = self._buddy_support_active()
         if self._ai_available() and not self._ai_skip_busy():
             def worker():
                 try:
-                    script = generate_banter_script(self.settings)
+                    script = generate_banter_script(self.settings, support=support)
                     self._pending_ai.append(("banter", script))
                 except LLMError:
                     self._pending_ai.append(("banter", None))
 
-            if self._run_ai("banter", worker, "对喷想词中..."):
+            tip = "应援想词中..." if support else "对喷想词中..."
+            if self._run_ai("banter", worker, tip):
                 return
         self._start_banter_with_script(None)
 
@@ -2681,7 +3345,239 @@ class RoachPet:
             self._sync_layout()
             self.say("会计去对账了喵", urgent=True)
 
+    def toggle_buddy_support(self):
+        """用户标记「月结中」→ 强制应援模式。"""
+        on = not self.settings.get("buddy_support_mode", False)
+        self.settings["buddy_support_mode"] = on
+        save_settings(self.app_root, self.settings)
+        if on:
+            # 手动标记覆盖「这次不是月结」的当日抑制
+            self._support_dismiss_until = 0.0
+            self.progress["support_dismiss_until"] = 0.0
+            save_progress(self.app_root, self.progress)
+            # 立刻拉长下一次自动对喷
+            lo = float(self.settings.get("buddy_banter_min") or 120)
+            hi = float(self.settings.get("buddy_banter_max") or 280)
+            self._next_banter = time.time() + random.uniform(lo * 2.0, hi * 2.8)
+            self.say("已标记月结中·会计改鼓励", urgent=True, life=160)
+        else:
+            self.say("月结标记关·恢复互怼", urgent=True, life=140)
+
+    def _buddy_support_context(self, *, apply_hold: bool = True) -> dict:
+        """
+        诊断当前应援状态与触发信号（供门控与误判反馈落盘）。
+        apply_hold=True 时，负载命中会写入约 15 分钟保持窗。
+        """
+        now = time.time()
+        dt = datetime.now()
+        day = dt.day
+        close_day = int(self.settings.get("close_day") or 0)
+        reasons: list[str] = []
+        cpu = None
+        mem_pct = None
+
+        if self.settings.get("buddy_support_mode", False):
+            reasons.append("manual")
+
+        dismiss_until = float(
+            getattr(self, "_support_dismiss_until", 0)
+            or self.progress.get("support_dismiss_until")
+            or 0
+        )
+        self._support_dismiss_until = dismiss_until
+        dismissed = (not reasons) and now < dismiss_until
+
+        hold_until = float(getattr(self, "_support_hold_until", 0) or 0)
+        if (not dismissed) and self.settings.get("buddy_auto_support", True):
+            if now < hold_until:
+                reasons.append("hold")
+                hr = str(getattr(self, "_support_hold_reason", "") or "")
+                if hr and hr not in reasons:
+                    reasons.append(hr)
+            win_lo = int(self.settings.get("close_window_start_day") or 0)
+            win_hi = int(self.settings.get("close_window_end_day") or 0)
+            if win_lo > 0 and win_hi > 0:
+                a, b = min(win_lo, win_hi), max(win_lo, win_hi)
+                if a <= day <= b and "close_day" not in reasons:
+                    reasons.append("close_day")
+            elif close_day > 0:
+                lo = max(1, close_day - 3)
+                hi = min(31, close_day + 3)
+                if lo <= day <= hi and "close_day" not in reasons:
+                    reasons.append("close_day")
+            elif (day <= 5 or day >= 25) and "calendar" not in reasons:
+                reasons.append("calendar")
+            if is_workday():
+                s = sample_load_light()
+                if s:
+                    cpu = float(s.get("cpu") or 0)
+                    mem_pct = float(s.get("mem_pct") or 0)
+                    if cpu >= 75 or mem_pct >= 85:
+                        if "load" not in reasons:
+                            reasons.append("load")
+                        if apply_hold and now >= hold_until:
+                            self._support_hold_until = now + 900
+                            self._support_hold_reason = "load"
+
+        # 手动标记不受 dismiss 影响；纯自动信号在 suppress 窗内视为未激活
+        if dismissed and "manual" not in reasons:
+            active = False
+            reasons = []
+        else:
+            active = bool(reasons)
+
+        return {
+            "active": active,
+            "reasons": reasons,
+            "dismissed": dismissed,
+            "cpu": cpu,
+            "mem_pct": mem_pct,
+            "day": day,
+            "weekday": dt.weekday(),
+            "hour": dt.hour,
+            "close_day": close_day,
+            "hold_until": float(getattr(self, "_support_hold_until", 0) or 0),
+            "dismiss_until": dismiss_until,
+        }
+
+    def _buddy_support_active(self) -> bool:
+        """
+        应援情境：用户标记月结中，或自动识别
+        - 日历：每月 1–5 / 25–月末，或 close_day±3
+        - 高负荷工作日：工作日且 CPU≥75% 或 内存≥85%（持续约 15 分钟）
+        - 用户「这次不是月结」后：当日抑制自动应援（手动标记仍可开）
+        """
+        return bool(self._buddy_support_context(apply_hold=True)["active"])
+
+    def dismiss_buddy_support(self):
+        """
+        一键反馈：这次不是月结 → 取消应援，并落盘信号供以后调阈值。
+        抑制自动应援到当天结束；手动「标记月结中」可随时重新打开。
+        """
+        ctx = self._buddy_support_context(apply_hold=False)
+        was_active = bool(ctx.get("active")) or bool(self.settings.get("buddy_support_mode"))
+        reasons = list(ctx.get("reasons") or [])
+        if self.settings.get("buddy_support_mode") and "manual" not in reasons:
+            reasons.append("manual")
+
+        # 即使当前刚好未激活，也允许记一笔「我认为现在不该应援」
+        cpu = ctx.get("cpu")
+        mem_pct = ctx.get("mem_pct")
+        if cpu is None or mem_pct is None:
+            s = sample_system(0.0)
+            if s:
+                if cpu is None:
+                    cpu = float(s.get("cpu") or 0)
+                if mem_pct is None:
+                    mem_pct = float(s.get("mem_pct") or 0)
+        event = {
+            "ts": int(time.time()),
+            "verdict": "not_month_end",
+            "was_active": was_active,
+            "reasons": reasons,
+            "cpu": cpu,
+            "mem_pct": mem_pct,
+            "day": ctx.get("day"),
+            "weekday": ctx.get("weekday"),
+            "hour": ctx.get("hour"),
+            "close_day": ctx.get("close_day"),
+        }
+        feedback = list(self.progress.get("support_feedback") or [])
+        feedback.append(event)
+        self.progress["support_feedback"] = feedback[-200:]
+
+        stats = dict(self.progress.get("support_fp_stats") or {})
+        stats["total"] = int(stats.get("total") or 0) + 1
+        for r in reasons or ["unknown"]:
+            stats[r] = int(stats.get(r) or 0) + 1
+        if not was_active:
+            stats["idle_click"] = int(stats.get("idle_click") or 0) + 1
+        self.progress["support_fp_stats"] = stats
+
+        if self.settings.get("buddy_support_mode", False):
+            self.settings["buddy_support_mode"] = False
+            save_settings(self.app_root, self.settings)
+
+        self._support_hold_until = 0.0
+        self._support_hold_reason = ""
+        # 抑制到本地次日 0 点，避免日历/负载当天反复误触发
+        tomorrow = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow = tomorrow + timedelta(days=1)
+        self._support_dismiss_until = tomorrow.timestamp()
+        self.progress["support_dismiss_until"] = self._support_dismiss_until
+        # 误判取消：不做收工庆祝
+        self._support_skip_close = True
+        self._support_worthy = False
+        self.progress["support_close_pending"] = False
+        save_progress(self.app_root, self.progress)
+
+        if was_active:
+            tip = "好·今天先不应援"
+            if "load" in reasons or "hold" in reasons:
+                tip = "记下了·负载不代表月结"
+            elif "calendar" in reasons or "close_day" in reasons:
+                tip = "记下了·今天先不当月结"
+            self.say(tip, urgent=True, life=160)
+        else:
+            self.say("记下了·今天先不应援", urgent=True, life=140)
+
+    def _watch_support_session(self) -> None:
+        """应援窗口边沿：真正月结结束 → 挂起收工仪式，等回家/睡觉触发。"""
+        now = time.time()
+        # 节流：勿每帧扫负载（会卡动画）
+        nxt = float(getattr(self, "_next_support_watch", 0) or 0)
+        if now < nxt and getattr(self, "_support_watch_ready", False):
+            return
+        self._next_support_watch = now + 2.5
+        ctx = self._buddy_support_context(apply_hold=True)
+        active = bool(ctx.get("active"))
+        reasons = set(ctx.get("reasons") or [])
+        # 日历/月结日/手动标记算「真应援」；纯负载代理不配收工礼花
+        worthy_now = bool(reasons & {"manual", "calendar", "close_day"})
+        if not getattr(self, "_support_watch_ready", False):
+            self._support_was_active = active
+            self._support_worthy = bool(active and worthy_now)
+            self._support_watch_ready = True
+            return
+        if active and worthy_now:
+            self._support_worthy = True
+        if self._support_was_active and not active:
+            if self._support_worthy and not self._support_skip_close:
+                self.progress["support_close_pending"] = True
+                save_progress(self.app_root, self.progress)
+            self._support_worthy = False
+            self._support_skip_close = False
+        self._support_was_active = active
+
+    def _consume_support_close_pending(self) -> bool:
+        if not self.progress.get("support_close_pending"):
+            return False
+        self.progress["support_close_pending"] = False
+        save_progress(self.app_root, self.progress)
+        return True
+
+    def _play_support_close_ritual(self) -> None:
+        """月结收工：专属台词 + 伸懒腰 + 小礼花。"""
+        self.roach.target_alpha = 255
+        self.roach.belly = False
+        self.roach.force_anim("waving", 4.8)
+        self.brain._set(State.GREET, 150)
+        self.fx("confetti", 20)
+        self.fx("star", 8)
+        line = PACKS.pick("support_close", Bubble.SUPPORT_CLOSE_PHRASES)
+        self.bubbles.clear()
+        self.bubbles.push_many([line, "伸个懒腰·收工"], life=155)
+
+    def _maybe_support_close_ritual(self) -> bool:
+        """回家/睡觉时：若有挂起的收工仪式则播放。"""
+        if not self._consume_support_close_pending():
+            return False
+        self._play_support_close_ritual()
+        return True
+
     def _check_buddy_banter(self):
+        if self._stealth or self._meeting_quiet():
+            return
         if not self.settings.get("accountant_buddy", True) or self.buddy is None or not self.buddy.active:
             return
         if self.buddy.bantering:
@@ -2694,11 +3590,15 @@ class RoachPet:
             return
         if self.bubbles.current or self.bubbles._q:
             return
-        if random.random() < 0.55:
+        support = self._buddy_support_active()
+        # 高压日：更少开口，间隔拉长
+        fire_chance = 0.28 if support else 0.55
+        mult = 2.6 if support else 1.0
+        if random.random() < fire_chance:
             self.do_banter()
         else:
-            lo = float(self.settings.get("buddy_banter_min") or 120)
-            hi = float(self.settings.get("buddy_banter_max") or 280)
+            lo = float(self.settings.get("buddy_banter_min") or 120) * mult
+            hi = float(self.settings.get("buddy_banter_max") or 280) * mult
             self._next_banter = now + random.uniform(min(lo, hi) * 0.5, max(lo, hi))
 
     def _setup_mac_window(self):
@@ -2758,6 +3658,8 @@ class RoachPet:
 
     def _win_apply_pos(self):
         if not self.hwnd:
+            return
+        if getattr(self, "_stealth", False):
             return
         import ctypes
         user32 = ctypes.windll.user32
@@ -2846,12 +3748,22 @@ class RoachPet:
             self.stop()
         elif cmd == "call":
             self.do_call()
+        elif cmd == "pet":
+            self.do_pet_head()
+        elif cmd == "feed":
+            self.do_feed()
+        elif cmd == "box":
+            self.do_box()
+        elif cmd == "sleep":
+            self.do_sleep()
         elif cmd == "overview":
             self.say_sys_overview()
         elif cmd == "passthrough":
             self.toggle_click_through()
         elif cmd == "status":
             self.say_status()
+        elif cmd == "toggle_simple_mode":
+            self.toggle_simple_mode()
         elif cmd == "toggle_bubbles":
             self.settings["bubbles_enabled"] = not self.settings.get("bubbles_enabled", True)
             save_settings(self.app_root, self.settings)
@@ -2871,6 +3783,10 @@ class RoachPet:
             self.say("监控告警开" if self.settings["sys_alerts"] else "监控告警关", urgent=True)
         elif cmd == "next_skin":
             self.cycle_skin()
+        elif cmd == "next_appearance":
+            self.cycle_appearance()
+        elif cmd == "toggle_appearance_lock":
+            self.toggle_appearance_lock()
         elif cmd == "titles":
             titles = self.progress.get("titles") or []
             if titles:
@@ -2886,14 +3802,32 @@ class RoachPet:
             self.do_banter()
         elif cmd == "toggle_buddy":
             self.toggle_buddy()
+        elif cmd == "toggle_buddy_support":
+            self.toggle_buddy_support()
+        elif cmd == "dismiss_buddy_support":
+            self.dismiss_buddy_support()
+        elif cmd == "replay_onboarding":
+            self.replay_onboarding()
         elif cmd == "story":
             self.do_story()
         elif cmd == "toggle_rest":
             self.toggle_rest_reminder()
+        elif cmd == "toggle_care":
+            self.toggle_care_reminders()
+        elif cmd == "cycle_care_preset":
+            self.cycle_care_preset()
+        elif cmd == "toggle_focus_pomodoro":
+            self.toggle_focus_pomodoro()
         elif cmd == "toggle_showcase":
             self.toggle_idle_showcase()
         elif cmd == "toggle_mouse_seek":
             self.toggle_mouse_seek()
+        elif cmd == "toggle_autonomy":
+            self.toggle_autonomy()
+        elif cmd == "toggle_meeting_silence":
+            self.toggle_meeting_silence()
+        elif cmd == "stealth_shot":
+            self._on_screenshot_hotkey()
         elif cmd == "cat_random":
             self.do_cat_random()
         elif cmd == "cat_meow":
@@ -2938,6 +3872,7 @@ class RoachPet:
         if cmd == "keyesc":
             self.stop()
             return
+        self._note_user_act()
         if cmd == "keyspace":
             self.brain.react_jump()
             self.roach.target_scale = 1.2
@@ -2996,6 +3931,92 @@ class RoachPet:
         save_settings(self.app_root, self.settings)
         self.say(f"皮肤:{nxt}", urgent=True)
         self.fx("star", 4)
+
+    def cycle_appearance(self):
+        """切换下一只猫形象；若已锁定则同步写入 slug。"""
+        apps = list_cat_appearances()
+        if not apps:
+            self.say("没有可用形象", urgent=True)
+            return
+        cur = str((self.appearance or {}).get("slug") or "")
+        idx = 0
+        for i, app in enumerate(apps):
+            if str(app.get("slug") or "") == cur:
+                idx = i
+                break
+        nxt = apps[(idx + 1) % len(apps)]
+        self.appearance = dict(nxt)
+        self.roach.apply_appearance(self.appearance)
+        if self.buddy is not None:
+            try:
+                self.buddy.roach.apply_appearance(self.appearance)
+            except Exception:
+                pass
+        slug = str(nxt.get("slug") or "")
+        self.settings["appearance_slug"] = slug
+        save_settings(self.app_root, self.settings)
+        label = appearance_label(nxt)
+        locked = "·已锁" if self.settings.get("appearance_lock") else ""
+        self.say(f"形象:{label}{locked}", urgent=True, life=140)
+        self.fx("star", 5)
+
+    def toggle_appearance_lock(self):
+        on = not self.settings.get("appearance_lock", False)
+        self.settings["appearance_lock"] = on
+        slug = str((self.appearance or {}).get("slug") or self.settings.get("appearance_slug") or "")
+        if slug:
+            self.settings["appearance_slug"] = slug
+        save_settings(self.app_root, self.settings)
+        label = appearance_label(self.appearance)
+        if on:
+            self.say(f"形象已锁定:{label}", urgent=True, life=150)
+        else:
+            self.say("形象解锁(下次随机)", urgent=True, life=140)
+
+    def toggle_simple_mode(self):
+        on = not self.settings.get("simple_mode", True)
+        self.settings["simple_mode"] = on
+        save_settings(self.app_root, self.settings)
+        if self._chrome is not None:
+            try:
+                self._chrome.rebuild_menus()
+            except Exception:
+                pass
+        if on:
+            self.say("极简模式开(菜单变短)", urgent=True, life=150)
+        else:
+            self.say("完整模式开(快捷键全开)", urgent=True, life=150)
+
+    def do_pet_head(self):
+        """菜单摸头：等同点猫头。"""
+        self._note_user_act()
+        self.brain.react_click()
+        self.roach.target_alpha = 255
+        self.roach.target_scale = 1.08
+        self.roach.force_anim("waving", 2.0)
+        self.fx("heart", 5)
+        self._note_progress(pet_count=1)
+        streak = self.brain.pet_streak
+        if streak >= 3 and streak % 3 == 0:
+            self.do_knead()
+            return
+        self.maybe_say(random.choice(Bubble.CLICK_PHRASES), chance=0.45)
+
+    def do_sleep(self):
+        """菜单睡觉：等同右键睡。"""
+        self._note_user_act()
+        closing = self._maybe_support_close_ritual()
+        if self.brain.state == State.SLEEP:
+            self.brain.go_hide()
+            if not closing:
+                self.fx("star", 3)
+                self.say("醒啦", urgent=True)
+        else:
+            self.brain._set(State.SLEEP, random.randint(400, 800))
+            self.roach.belly = False
+            self.roach.target_alpha = 255
+            if not closing:
+                self.say("Zzz…", urgent=True, life=100)
 
     # ── 问候 / 天气 / 提醒 ────────────────────────────────
 
@@ -3080,6 +4101,9 @@ class RoachPet:
             self._init_buddy()
         if self.buddy is None:
             return
+        support = self._buddy_support_active()
+        if script is None:
+            script = pick_banter_script(support=support)
         self.buddy.active = True
         self._sync_layout()
         self.roach.target_alpha = 255
@@ -3088,24 +4112,10 @@ class RoachPet:
             self.brain._set(State.GREET, 160)
         self.buddy.start_banter(script)
         self._note_progress(banter_count=1)
-        lo = float(self.settings.get("buddy_banter_min") or 120)
-        hi = float(self.settings.get("buddy_banter_max") or 280)
+        mult = 2.6 if support else 1.0
+        lo = float(self.settings.get("buddy_banter_min") or 120) * mult
+        hi = float(self.settings.get("buddy_banter_max") or 280) * mult
         self._next_banter = time.time() + random.uniform(min(lo, hi), max(lo, hi))
-
-    def _queue_startup_greetings(self):
-        label = (
-            getattr(self, "appearance", {}) or {}
-        ).get("name_zh") or (getattr(self, "appearance", {}) or {}).get("name") or "小猫"
-        if self.settings.get("bubbles_enabled", True):
-            tip = f"{greeting_by_period()} {date_phrase()}"
-            self.bubbles.push(tip, life=160)
-            self.bubbles.push(f"今日形象:{label}", life=140)
-            if is_workday():
-                self.bubbles.push(worker_startup_tip(), life=140)
-        # 挥爪打个招呼，随后回窗台趴窝
-        self.brain._set(State.GREET, 100)
-        self.roach.target_alpha = 255
-        self.roach.force_anim("waving", 3.0)
 
     def say(self, text: str, life: int = 160, urgent: bool = False):
         # 关气泡时仍允许 urgent（热键/菜单反馈）
@@ -3145,7 +4155,19 @@ class RoachPet:
         aff = int(self.brain.affection)
         mood = "饿" if h > 70 else ("困" if e < 30 else "精神")
         hide = "趴窝" if self.brain.state == State.HIDE else "在外面"
-        self.say(f"{mood} {hide} 亲密度{aff}", urgent=True)
+        extra = ""
+        if self._stealth:
+            extra = " 静默收起"
+        elif self._casting:
+            extra = " 投屏中"
+        elif self._meeting_level == "meeting":
+            extra = " 开会安静"
+        elif self._focus_pomodoro_active():
+            left = max(1, int(math.ceil((float(self._focus_until) - time.time()) / 60)))
+            extra = f" 专注剩{left}分"
+        elif self._buddy_support_active():
+            extra = " 月结应援中"
+        self.say(f"{mood} {hide} 亲密度{aff}{extra}", urgent=True)
 
     def say_sys_cpu(self):
         self.roach.target_alpha = 255
@@ -3397,11 +4419,57 @@ class RoachPet:
         self.roach.belly = False
         self._rest_active = True
         self.bubbles.clear()
-        line = pick_rest_line()
+        line = PACKS.pick("care_rest", REST_PHRASES)
         self.bubbles.push_many([line, "起来活动一下", "点我可关掉提示"], life=140)
         self.brain.react_dance()
         self.roach.force_anim("waving", 6.0)
         self.fx("star", 8)
+
+    def _pick_care_line(self, kind: str) -> str:
+        fallback = {
+            "eye": CARE_EYE_PHRASES,
+            "water": CARE_WATER_PHRASES,
+            "stretch": CARE_STRETCH_PHRASES,
+            "rest": REST_PHRASES,
+        }.get(kind, REST_PHRASES)
+        cat = {
+            "eye": "care_eye",
+            "water": "care_water",
+            "stretch": "care_stretch",
+            "rest": "care_rest",
+        }.get(kind, "care_rest")
+        return PACKS.pick(cat, fallback)
+
+    def do_care_nudge(self, kind: str):
+        """护眼/喝水/伸展：轻量提醒（气泡+小动作），不抢屏幕中央。"""
+        if kind not in ("eye", "water", "stretch"):
+            return
+        if self.buddy and self.buddy.bantering:
+            self._next_care[kind] = time.time() + 90
+            return
+        self.roach.target_alpha = 255
+        line = self._pick_care_line(kind)
+        hint = {
+            "eye": "看远处20秒",
+            "water": "去接杯水吧",
+            "stretch": "站起来伸一下",
+        }.get(kind, "")
+        self.say(line, urgent=True, life=140)
+        if hint and random.random() < 0.55:
+            self.bubbles.push(hint, life=100)
+        if kind == "stretch":
+            self.brain.react_dance()
+            self.roach.force_anim("waving", 4.0)
+            self.fx("star", 4)
+        elif kind == "eye":
+            self.brain._set(State.CURIOUS, 70)
+            self.fx("star", 3)
+        else:  # water
+            self.fx("crumb", 4)
+            try:
+                self.brain._set(State.GREET, 50)
+            except Exception:
+                pass
 
     def toggle_rest_reminder(self):
         on = not self.settings.get("rest_reminder", True)
@@ -3414,6 +4482,105 @@ class RoachPet:
         else:
             self._rest_active = False
             self.say("休息提醒关", urgent=True)
+
+    def toggle_care_reminders(self):
+        on = not self.settings.get("care_reminders", True)
+        self.settings["care_reminders"] = on
+        save_settings(self.app_root, self.settings)
+        if on:
+            now = time.time()
+            self._next_care = {
+                "eye": now + max(60.0, float(self.settings.get("care_eye_sec") or 1200) * 0.3),
+                "water": now + max(90.0, float(self.settings.get("care_water_sec") or 1800) * 0.35),
+                "stretch": now + max(120.0, float(self.settings.get("care_stretch_sec") or 2700) * 0.4),
+            }
+            preset = str(self.settings.get("care_preset") or "standard")
+            self.say(f"养生提醒开({preset})", urgent=True, life=140)
+        else:
+            self.say("养生提醒关", urgent=True)
+
+    def cycle_care_preset(self):
+        """在 gentle / standard / strict 间切换，并写回间隔秒数。"""
+        order = ("gentle", "standard", "strict")
+        cur = str(self.settings.get("care_preset") or "standard")
+        try:
+            idx = order.index(cur if cur in order else "standard")
+        except ValueError:
+            idx = 1
+        nxt = order[(idx + 1) % len(order)]
+        self._apply_care_preset(nxt, announce=True)
+
+    def _focus_pomodoro_active(self) -> bool:
+        return time.time() < float(getattr(self, "_focus_until", 0) or 0)
+
+    def toggle_focus_pomodoro(self):
+        """手动开/关 25 分钟专注：期间安静蹲守，结束跑来催休息。"""
+        if self._focus_pomodoro_active() or getattr(self, "_focus_end_pending", False):
+            self._cancel_focus_pomodoro(announce=True)
+            return
+        self._start_focus_pomodoro()
+
+    def _start_focus_pomodoro(self) -> None:
+        sec = int(self.settings.get("focus_pomodoro_sec") or 1500)
+        sec = max(60, min(7200, sec))
+        self._focus_until = time.time() + sec
+        self._focus_end_pending = False
+        self._rest_active = False
+        if self.buddy and getattr(self.buddy, "bantering", False):
+            try:
+                self.buddy.bubbles.clear()
+                self.buddy._script.clear()
+            except Exception:
+                pass
+        self.bubbles.clear()
+        self.brain.follow = False
+        self.brain.go_hide(scramble=False)
+        self.roach.belly = False
+        self.roach.target_alpha = 255
+        self.roach.force_anim("waiting", 10.0)
+        mins = max(1, int(round(sec / 60.0)))
+        self.say(f"专注{mins}分·我蹲着陪你", urgent=True, life=160)
+        self.fx("star", 2)
+
+    def _cancel_focus_pomodoro(self, announce: bool = True) -> None:
+        self._focus_until = 0.0
+        self._focus_end_pending = False
+        if announce:
+            self.say("专注取消了", urgent=True, life=120)
+
+    def _check_focus_pomodoro(self) -> None:
+        until = float(getattr(self, "_focus_until", 0) or 0)
+        if until > 0 and time.time() >= until:
+            self._focus_until = 0.0
+            if self._stealth:
+                self._focus_end_pending = True
+            else:
+                self._finish_focus_pomodoro()
+            return
+        if getattr(self, "_focus_end_pending", False) and not self._stealth:
+            self._finish_focus_pomodoro()
+
+    def _finish_focus_pomodoro(self) -> None:
+        """番茄结束：跑向指针，催休息（点猫可关掉）。"""
+        self._focus_end_pending = False
+        self._focus_until = 0.0
+        self.roach.target_alpha = 255
+        self.roach.belly = False
+        self.brain.react_call()
+        self.brain.state_timer = max(int(self.brain.state_timer), 520)
+        self.roach.force_anim("waving", 5.5)
+        self._rest_active = True
+        self.bubbles.clear()
+        line = PACKS.pick("focus_done", Bubble.FOCUS_DONE_PHRASES)
+        self.bubbles.push_many([line, "起来活动一下", "点我关掉提示"], life=155)
+        self.fx("star", 8)
+        self.fx("heart", 4)
+        # 错开固定养生/小时休息，避免刚收工又被闹钟追着喊
+        now = time.time()
+        for kind in ("eye", "water", "stretch"):
+            nxt = float(self._next_care.get(kind) or 0)
+            self._next_care[kind] = max(nxt, now + random.uniform(700, 1400))
+        self._next_rest = max(float(getattr(self, "_next_rest", 0) or 0), now + 1800)
 
     def toggle_idle_showcase(self):
         on = not self.settings.get("idle_showcase", True)
@@ -3437,6 +4604,49 @@ class RoachPet:
         else:
             self._seek_act = None
             self.say("寻访关", urgent=True)
+
+    def toggle_autonomy(self):
+        on = not self.settings.get("autonomy", True)
+        self.settings["autonomy"] = on
+        save_settings(self.app_root, self.settings)
+        if on:
+            lo = float(self.settings.get("autonomy_min") or 50)
+            hi = float(self.settings.get("autonomy_max") or 120)
+            self._next_autonomy = time.time() + random.uniform(min(lo, hi), max(lo, hi))
+            self.say("自主行为开", urgent=True)
+        else:
+            self.say("自主行为关", urgent=True)
+
+    def toggle_meeting_silence(self):
+        on = not self.settings.get("meeting_silence", True)
+        self.settings["meeting_silence"] = on
+        save_settings(self.app_root, self.settings)
+        if on:
+            self.say("静默开(会议/投屏/截图)", urgent=True, life=150)
+            self._next_meeting_check = 0.0
+            if self._chrome is not None:
+                try:
+                    self._chrome.set_shot_watch(True)
+                except Exception:
+                    pass
+        else:
+            if self._stealth:
+                self._set_stealth(False, reason="")
+            self._shot_hide_until = 0.0
+            if self._chrome is not None:
+                try:
+                    self._chrome.set_shot_watch(False)
+                except Exception:
+                    pass
+            self.say("会议静默关", urgent=True)
+
+    def _on_screenshot_hotkey(self) -> None:
+        """截图快捷键：立刻收起，约 2.5s 后可恢复（仍投屏/共享则继续藏）。"""
+        if not self.settings.get("meeting_silence", True):
+            return
+        self._shot_hide_until = time.time() + 2.5
+        self._stealth_clear_at = 0.0
+        self._set_stealth(True, reason="screenshot")
 
     def toggle_ai(self):
         ai = self.settings.setdefault("ai", {})
@@ -3473,18 +4683,27 @@ class RoachPet:
 
     def say_help(self):
         self.bubbles.clear()
-        self.bubbles.push_many([
-            "上头摸·下身逗·双击跑·连摸踩奶",
-            "N纸箱 C回窝 E打猎 Q观鸟 Z跑酷",
-            "U露肚 L激光 V炸毛 X扑击 K召唤",
-            "⌥M连喵 ⌥S晒太阳 ⌥R抓挠 ⌥G送礼",
-            "⌥T死盯 ⌥N推桌 ⌥H蹭头 ⌥C颤叫 ⌥I傲娇",
-            "⌥K踩奶 ⌥B舔毛 · 菜单也可点猫咪互动",
-            "H帮助 T故事 ,对喷 · Ctrl+Alt+R召唤",
-        ], life=150)
+        if self.settings.get("simple_mode", True):
+            self.bubbles.push_many([
+                "极简:上头摸·菜单投喂/召唤/纸箱/睡觉",
+                "右键也可睡觉 · 点菜单「更多」看全部",
+                "H帮助 · 关极简:菜单「关闭极简模式」",
+            ], life=160)
+        else:
+            self.bubbles.push_many([
+                "上头摸·下身逗·双击跑·连摸踩奶",
+                "N纸箱 C回窝 E打猎 Q观鸟 Z跑酷",
+                "U露肚 L激光 V炸毛 X扑击 K召唤",
+                "⌥M连喵 ⌥S晒太阳 ⌥R抓挠 ⌥G送礼",
+                "⌥T死盯 ⌥N推桌 ⌥H蹭头 ⌥C颤叫 ⌥I傲娇",
+                "⌥K踩奶 ⌥B舔毛 · 菜单也可点猫咪互动",
+                "H帮助 T故事 ,对喷 · Ctrl+Alt+R召唤",
+            ], life=150)
 
     def _check_sys_alerts(self):
         """周期性检查资源，过高时嘀咕一声。"""
+        if self._stealth or self._meeting_quiet():
+            return
         now = time.time()
         if now < self._next_sys_check:
             return
@@ -3535,6 +4754,8 @@ class RoachPet:
 
     def _check_worker_schedule(self):
         """到点提醒：打卡、喝水、午饭、下班等。"""
+        if self._stealth or self._meeting_quiet():
+            return
         if not self.settings.get("worker_reminders", True) and not self.settings.get("finance_reminders", True):
             return
         if self.bubbles.current or self.bubbles._q:
@@ -3559,6 +4780,8 @@ class RoachPet:
                 self.brain._set(State.GREET, 80)
 
     def _check_hourly_chime(self):
+        if self._stealth or self._meeting_quiet():
+            return
         now = datetime.now()
         if now.minute == 0 and now.hour != self._last_hour_chime:
             self._last_hour_chime = now.hour
@@ -3593,10 +4816,13 @@ class RoachPet:
                     self.say(worker_random_tip(), life=130)
 
     def _check_proactive(self):
+        if self._stealth or self._meeting_quiet():
+            return
         now = time.time()
         if now < self._next_proactive:
             return
-        self._next_proactive = now + random.uniform(300, 600)
+        iv = float(self.settings.get("interaction_interval_sec") or 300)
+        self._next_proactive = now + random.uniform(iv * 1.2, iv * 2.0)
         if self.brain.state in (State.SLEEP, State.DRAGGED, State.RUN, State.FOLLOW, State.LASER):
             return
         if self.bubbles.current or self.bubbles._q:
@@ -3629,6 +4855,8 @@ class RoachPet:
 
     def _check_idle_showcase(self):
         """周期随机表演：短暂现身 + 一句闲聊（对标 DeskTopPet 定时切动作/文字）。"""
+        if self._stealth or self._meeting_quiet():
+            return
         if not self.settings.get("idle_showcase", True):
             return
         now = time.time()
@@ -3731,6 +4959,8 @@ class RoachPet:
 
     def _check_rest_reminder(self):
         """每小时休息提醒（对标 DeskTopPet haveRest）。"""
+        if self._stealth or self._meeting_quiet():
+            return
         if not self.settings.get("rest_reminder", True):
             return
         now = time.time()
@@ -3749,8 +4979,54 @@ class RoachPet:
             return
         self.do_rest_break()
 
+    def _check_care_reminders(self):
+        """护眼/喝水/伸展：可自定义间隔的轻量提醒。"""
+        if self._stealth or self._meeting_quiet():
+            return
+        if not self.settings.get("care_reminders", True):
+            return
+        if self._rest_active:
+            return
+        if self.dragging or self.right_dragging:
+            return
+        if self.buddy and self.buddy.bantering:
+            return
+        if self.bubbles.current or self.bubbles._q:
+            return
+        if self.brain.state in (State.SLEEP, State.DRAGGED, State.LASER, State.PANIC, State.RUN, State.FOLLOW):
+            return
+        hour = datetime.now().hour
+        if hour < 8 or hour >= 23:
+            return
+        now = time.time()
+        interval_key = {
+            "eye": "care_eye_sec",
+            "water": "care_water_sec",
+            "stretch": "care_stretch_sec",
+        }
+        defaults = {"eye": 1200, "water": 1800, "stretch": 2700}
+        # 同一帧只催一种，优先到期最久的
+        due: list[tuple[float, str]] = []
+        for kind in ("eye", "water", "stretch"):
+            nxt = float(self._next_care.get(kind) or 0)
+            if now >= nxt:
+                due.append((nxt, kind))
+        if not due:
+            return
+        due.sort()
+        kind = due[0][1]
+        iv = float(self.settings.get(interval_key[kind]) or defaults[kind])
+        self._next_care[kind] = now + max(120.0, iv)
+        # 错开其它项，避免连发
+        for other, t in list(self._next_care.items()):
+            if other != kind and t <= now + 45:
+                self._next_care[other] = now + 60 + random.uniform(20, 90)
+        self.do_care_nudge(kind)
+
     def _check_worker_idle_nudge(self):
         """久坐轻推：间隔较长，只在工作时段。"""
+        if self._stealth or self._meeting_quiet():
+            return
         if not self.settings.get("worker_reminders", True):
             return
         now_ts = time.time()
@@ -3819,6 +5095,8 @@ class RoachPet:
     def _check_mouse_seek(self, mx: float, my: float):
         """鼠标长时间不动时，跑去找指针并随机互动。"""
         self._track_mouse_idle(mx, my)
+        if self._stealth or self._meeting_quiet():
+            return
         if not self.settings.get("mouse_seek", True):
             return
         now = time.time()
@@ -3950,6 +5228,7 @@ class RoachPet:
             )
 
     def do_feed(self, feast: bool = False):
+        self._note_user_act()
         self.brain.react_feed(feast=feast)
         self.roach.target_scale = 1.18 if feast else 1.12
         self.roach.belly = False
@@ -3969,12 +5248,15 @@ class RoachPet:
         self.maybe_say(random.choice(["蹦迪喵!", "甩尾巴!", "猫步!"]), chance=0.35)
 
     def do_home(self):
+        closing = self._maybe_support_close_ritual()
         sw, sh = get_desktop_size()
         self.brain.target_x = (sw - WIN_W) // 2
         self.brain.target_y = sh - WIN_H - 50
         self.brain._set(State.RUN, 180)
         self.brain.pet_streak = 0
         self.roach.belly = False
+        if not closing:
+            self.fx("star", 2)
 
     def do_hide(self):
         """回窝趴下（面团猫）。"""
@@ -3982,6 +5264,7 @@ class RoachPet:
 
     def do_loaf(self):
         """面团模式：回角落趴窝；途中用 Running，到了再 Waiting。"""
+        closing = self._maybe_support_close_ritual()
         self.roach.belly = False
         # 已在窝里：原地面团，不重新选点乱跑
         if self.brain.state == State.HIDE:
@@ -3991,15 +5274,17 @@ class RoachPet:
             )
             if near:
                 self.brain.vx = self.brain.vy = 0
-                self.roach.force_anim("waiting", 5.0)
-                self.fx("star", 2)
-                self.maybe_say(random.choice(Bubble.LOAF_PHRASES), chance=0.4)
+                if not closing:
+                    self.roach.force_anim("waiting", 5.0)
+                    self.fx("star", 2)
+                    self.maybe_say(random.choice(Bubble.LOAF_PHRASES), chance=0.4)
                 return
         self.brain.go_hide(scramble=False)
         # 到站后再面团；移动中由 tick 强制 Running
-        self.roach.force_anim("waiting", 6.0)
-        self.fx("star", 2)
-        self.maybe_say(random.choice(Bubble.LOAF_PHRASES), chance=0.4)
+        if not closing:
+            self.roach.force_anim("waiting", 6.0)
+            self.fx("star", 2)
+            self.maybe_say(random.choice(Bubble.LOAF_PHRASES), chance=0.4)
 
     def do_belly(self):
         self.brain.react_belly()
@@ -4217,8 +5502,298 @@ class RoachPet:
         )
         random.choice(acts)()
 
+    def do_stroll(self):
+        """自主散步。"""
+        self.brain.react_stroll()
+        self.roach.belly = False
+        self.roach.hanging = False
+        self.roach.anim_override = None
+        self.fx("dust", 2)
+        self.maybe_say(random.choice(Bubble.STROLL_PHRASES), chance=0.45, life=100)
+
+    def do_daydream(self):
+        """原地发呆。"""
+        self.brain.react_daydream()
+        self.roach.belly = False
+        self.roach.hanging = False
+        self.roach.force_anim("waiting", 5.0)
+        self.fx("star", 2)
+        self.maybe_say(random.choice(Bubble.DAYDREAM_PHRASES), chance=0.5, life=110)
+
+    def do_nap(self):
+        """自主打瞌睡。"""
+        self.brain.react_nap()
+        self.roach.belly = False
+        self.roach.hanging = False
+        self.roach.force_anim("waiting", 8.0)
+        self.fx("star", 2)
+        self.maybe_say(random.choice(Bubble.NAP_PHRASES), chance=0.55, life=120)
+
+    def do_climb(self):
+        """攀爬到屏幕上沿。"""
+        self.brain.react_climb()
+        self.roach.belly = False
+        self.roach.hanging = False
+        self.roach.anim_override = None
+        self.fx("dust", 3)
+        self.maybe_say(random.choice(Bubble.CLIMB_PHRASES), chance=0.5, life=110)
+
+    def do_hang(self):
+        """倒挂在屏幕边缘。"""
+        self.brain.react_hang()
+        self.roach.belly = False
+        self.roach.hanging = True
+        self.roach.force_anim("waiting", 6.0)
+        self.fx("star", 3)
+        self.maybe_say(random.choice(Bubble.HANG_PHRASES), chance=0.55, life=110)
+
+    def _note_user_act(self):
+        """记录用户互动，推迟自主行为。"""
+        self._last_user_act = time.time()
+
+    def _routine_mode(self) -> str:
+        respect = bool(self.settings.get("autonomy_respect_focus", True))
+        meeting = self._meeting_level if self.settings.get("meeting_silence", True) else ""
+        return routine_mode(respect_focus=respect, meeting_level=meeting)
+
+    def _set_stealth(self, on: bool, reason: str = "") -> None:
+        """共享/投屏/截图时隐藏窗口，避免入镜或投屏翻车。"""
+        if bool(on) == bool(self._stealth):
+            if on and reason:
+                self._stealth_reason = reason
+            return
+        self._stealth = bool(on)
+        if on:
+            self._stealth_reason = reason or self._stealth_reason or "hide"
+            self.bubbles.clear()
+            self.bubble = None
+            if self.buddy:
+                try:
+                    self.buddy.bubbles.clear()
+                    self.buddy._script = []
+                except Exception:
+                    pass
+            if self._rest_active:
+                self._rest_active = False
+            self._hide_pet_window()
+            label = {
+                "sharing": "共享屏幕",
+                "casting": "投屏/镜像",
+                "screenshot": "截图",
+            }.get(self._stealth_reason, self._stealth_reason)
+            print(f"静默: 检测到{label}，已收起桌宠")
+        else:
+            self._show_pet_window()
+            print("静默: 已恢复显示")
+            self._stealth_reason = ""
+
+    def _hide_pet_window(self) -> None:
+        try:
+            if IS_MAC and self.window is not None:
+                self.window.orderOut_(None)
+            elif IS_WIN and self.hwnd:
+                import ctypes
+                ctypes.windll.user32.ShowWindow(int(self.hwnd), 0)  # SW_HIDE
+        except Exception:
+            pass
+
+    def _show_pet_window(self) -> None:
+        try:
+            if IS_MAC and self.window is not None:
+                self._mac_last_origin = None
+                sx, sy = self._screen_pos()
+                self._mac_place_window(sx, sy, force_front=True)
+            elif IS_WIN and self.hwnd:
+                import ctypes
+                user32 = ctypes.windll.user32
+                user32.ShowWindow(int(self.hwnd), 4)  # SW_SHOWNOACTIVATE
+                self._win_apply_pos()
+        except Exception:
+            pass
+
+    def _check_meeting_silence(self) -> None:
+        """共享/投屏/截图 → 收起；开会 → 安静档。截图热键每帧检查。"""
+        now = time.time()
+        if not self.settings.get("meeting_silence", True):
+            self._meeting_level = ""
+            self._casting = False
+            self._shot_tool = False
+            self._shot_hide_until = 0.0
+            self._meeting_busy = False
+            self._meeting_end_egg_pending = False
+            if self._stealth:
+                self._set_stealth(False)
+            return
+
+        shot_hotkey = now < self._shot_hide_until
+
+        if now >= self._next_meeting_check:
+            self._next_meeting_check = now + 2.0
+            info = detect_presence()
+            prev_busy = bool(self._meeting_busy)
+            self._meeting_level = str(info.get("meeting_level") or "")
+            self._casting = bool(info.get("casting"))
+            self._shot_tool = bool(info.get("screenshot"))
+            busy = self._meeting_level in ("meeting", "sharing")
+            if busy and not prev_busy:
+                self._meeting_since = now
+            elif prev_busy and not busy:
+                self._on_meeting_session_end(now)
+            self._meeting_busy = busy
+
+        should_hide = (
+            self._meeting_level == "sharing"
+            or self._casting
+            or self._shot_tool
+            or shot_hotkey
+        )
+        if should_hide:
+            self._stealth_clear_at = 0.0
+            if self._meeting_level == "sharing":
+                reason = "sharing"
+            elif self._casting:
+                reason = "casting"
+            else:
+                reason = "screenshot"
+            self._set_stealth(True, reason=reason)
+            return
+
+        # 条件解除：截图快速恢复，共享/投屏稍缓避免闪烁
+        if self._stealth:
+            delay = 0.6 if self._stealth_reason == "screenshot" else 3.0
+            if self._stealth_clear_at <= 0:
+                self._stealth_clear_at = now + delay
+            elif now >= self._stealth_clear_at:
+                self._stealth_clear_at = 0.0
+                self._set_stealth(False)
+                self._flush_meeting_end_egg()
+                if getattr(self, "_focus_end_pending", False):
+                    self._finish_focus_pomodoro()
+        else:
+            self._flush_meeting_end_egg()
+            if getattr(self, "_focus_end_pending", False):
+                self._finish_focus_pomodoro()
+
+    def _on_meeting_session_end(self, now: float | None = None) -> None:
+        """开会/共享落下：挂起一句陪伴彩蛋（短闪误检不报）。"""
+        now = time.time() if now is None else now
+        started = float(getattr(self, "_meeting_since", 0) or 0)
+        duration = (now - started) if started > 0 else 0.0
+        if duration < 45.0:
+            return
+        if now < float(getattr(self, "_meeting_end_egg_at", 0) or 0):
+            return
+        if self._guide_active():
+            return
+        self._meeting_end_egg_at = now + 120.0
+        self._meeting_end_egg_pending = True
+
+    def _flush_meeting_end_egg(self) -> None:
+        if not getattr(self, "_meeting_end_egg_pending", False):
+            return
+        if self._stealth:
+            return
+        self._meeting_end_egg_pending = False
+        self._play_meeting_end_egg()
+
+    def _play_meeting_end_egg(self) -> None:
+        line = PACKS.pick("meeting_end", Bubble.MEETING_END_PHRASES)
+        self.roach.target_alpha = 255
+        self.fx("star", 3)
+        self.say(line, urgent=True, life=150)
+
+    def _meeting_quiet(self) -> bool:
+        """开会/投屏/专注番茄/系统专注时压低主动喧哗（仍可见，除非已 stealth）。"""
+        if self._stealth:
+            return True
+        if self._focus_pomodoro_active():
+            return True
+        if not self.settings.get("meeting_silence", True):
+            return False
+        if self._meeting_level in ("meeting", "sharing") or self._casting:
+            return True
+        if self.settings.get("autonomy_respect_focus", True):
+            return system_focus_active() is True
+        return False
+
+    def _check_autonomy(self):
+        """无人操作时按作息加权触发散步/发呆/瞌睡/攀爬/倒挂。"""
+        if self._stealth:
+            return
+        if self._focus_pomodoro_active():
+            return
+        if not self.settings.get("autonomy", True):
+            return
+        now = time.time()
+        if now < self._next_autonomy:
+            return
+        lo = float(self.settings.get("autonomy_min") or 50)
+        hi = float(self.settings.get("autonomy_max") or 120)
+        self._next_autonomy = now + random.uniform(min(lo, hi), max(lo, hi))
+
+        idle_need = float(self.settings.get("autonomy_idle_sec") or 45)
+        if now - self._last_user_act < max(15.0, idle_need):
+            return
+        if self.dragging or self.right_dragging or self._rest_active:
+            return
+        if self.buddy and self.buddy.bantering:
+            return
+        if self.bubbles.current or self.bubbles._q:
+            return
+        st = self.brain.state
+        if st not in (State.HIDE, State.IDLE):
+            return
+        # 窝里还在跑向目标时先别打断
+        if st == State.HIDE and self.brain.target_x is not None:
+            if math.hypot(self.x - self.brain.target_x, self.y - (self.brain.target_y or self.y)) > 14:
+                return
+
+        mode = self._routine_mode()
+        if mode == "sleepish":
+            weights = [
+                (self.do_nap, 0.42),
+                (self.do_daydream, 0.28),
+                (self.do_stroll, 0.18),
+                (self.do_hang, 0.07),
+                (self.do_climb, 0.05),
+            ]
+        elif mode == "quiet":
+            weights = [
+                (self.do_daydream, 0.34),
+                (self.do_nap, 0.26),
+                (self.do_stroll, 0.24),
+                (self.do_climb, 0.10),
+                (self.do_hang, 0.06),
+            ]
+        else:  # active
+            weights = [
+                (self.do_stroll, 0.30),
+                (self.do_climb, 0.22),
+                (self.do_daydream, 0.20),
+                (self.do_hang, 0.16),
+                (self.do_nap, 0.12),
+            ]
+        r = random.random()
+        acc = 0.0
+        chosen = weights[-1][0]
+        for fn, w in weights:
+            acc += w
+            if r <= acc:
+                chosen = fn
+                break
+        chosen()
+        # 避免与周期表演同帧抢戏
+        iv = float(self.settings.get("interaction_interval_sec") or 300)
+        self._next_showcase = max(
+            self._next_showcase,
+            now + random.uniform(max(60.0, iv * 0.15), max(90.0, iv * 0.25)),
+        )
+
     def _cat_hotkey(self, chars: str) -> bool:
         """Alt/⌥ + 字母：猫咪专属快捷键。返回是否已处理。"""
+        # 极简模式不暴露十多组 ⌥ 键，避免误触与记忆负担
+        if self.settings.get("simple_mode", True):
+            return False
         cat_map = {
             "m": self.do_meow,
             "s": self.do_sunbathe,
@@ -4238,6 +5813,7 @@ class RoachPet:
         }
         fn = cat_map.get(chars)
         if fn:
+            self._note_user_act()
             fn()
             return True
         return False
@@ -4272,6 +5848,22 @@ class RoachPet:
     def _dispatch_char_key(self, chars: str) -> None:
         """Mac/Windows 共用的字符快捷键（不含修饰键专属猫互动）。"""
         if not chars:
+            return
+        self._note_user_act()
+        # 极简：只保留最常用几个键
+        if self.settings.get("simple_mode", True):
+            simple_map = {
+                "n": self.do_box,
+                "k": self.do_call,
+                "f": self.do_feed,
+                "h": self.say_help,
+                "s": self.say_status,
+                "-": self.toggle_click_through,
+                "=": self.cycle_skin,
+            }
+            fn = simple_map.get(chars)
+            if fn:
+                fn()
             return
         if chars == "p":
             self.brain.react_poke()
@@ -4350,6 +5942,18 @@ class RoachPet:
             return self.x, self._sh() - self.y - WIN_H
         return self.x, self.y
 
+    def _mac_place_window(self, sx: float, sy: float, *, force_front: bool = False) -> None:
+        """更新 Mac 窗位；仅在移动或显式要求时 orderFront，避免每帧抢焦点卡顿。"""
+        if self.window is None:
+            return
+        origin = (int(sx), int(sy))
+        last = getattr(self, "_mac_last_origin", None)
+        if last != origin:
+            self.window.setFrameOrigin_(origin)
+            self._mac_last_origin = origin
+        if force_front:
+            self.window.orderFrontRegardless()
+
     def _event_local(self, event) -> tuple[int, int]:
         if IS_WIN or getattr(event, "_is_pygame", False):
             loc = event.locationInWindow()
@@ -4369,13 +5973,25 @@ class RoachPet:
         return loc.x, self._sh() - loc.y
 
     def _hit(self, mx: int, my: int) -> bool:
+        if self._guide_hit_choice(mx, my):
+            return True
         bx, by = PAD_X, ROACH_Y
         bw, bh = self.roach.sw, self.roach.sh
         if bx <= mx <= bx + bw and by <= my <= by + bh:
             return True
         if self.bubble and my < ROACH_Y:
             return True
+        if self._guide_lines or self._guide_choices:
+            # 引导层占窗口上半，保证可点
+            if my < ROACH_Y + 56:
+                return True
         return False
+
+    def _guide_hit_choice(self, mx: int, my: int) -> str | None:
+        for rect, cid in getattr(self, "_guide_btn_rects", []) or []:
+            if rect.collidepoint(mx, my):
+                return cid
+        return None
 
     def _update_mouse_passthrough(self):
         """鼠标不在小猫上时穿透点击；强制穿透模式下始终穿透。"""
@@ -4484,6 +6100,22 @@ class RoachPet:
             self._win_focus_for_input()
             # 点过后 90 秒内即使鼠标稍稍移开也可按快捷键
             self._win_keys_until = time.time() + 90.0
+        self._note_user_act()
+
+        # 首次引导：只认气泡按钮，不挡拖拽以外的工作
+        if self._guide_active() and self._guide_step >= 0:
+            cid = self._guide_hit_choice(mx, my)
+            if cid:
+                self._on_guide_choice(cid)
+                return
+            # 点在猫身上仍可拖，不自动选题
+            self.dragging = True
+            self.drag_start = (event.locationInWindow().x, event.locationInWindow().y)
+            self.press_time = time.time()
+            self.press_pos = (mx, my)
+            self.moved_while_press = False
+            self.shake_accum = 0.0
+            return
 
         # 睡觉时单击叫醒，稍后仍会回窝趴着
         if self.brain.state == State.SLEEP:
@@ -4660,14 +6292,24 @@ class RoachPet:
         if IS_WIN:
             self._win_focus_for_input()
             self._win_keys_until = time.time() + 90.0
+        self._note_user_act()
+        if self._guide_active() and self._guide_step >= 0:
+            # 引导中右键不当睡觉/跳过，避免误触；仍可拖
+            self.right_dragging = True
+            self.right_drag_start = (event.locationInWindow().x, event.locationInWindow().y)
+            return
         if self.brain.state == State.SLEEP:
+            closing = self._maybe_support_close_ritual()
             self.brain.go_hide()
-            self.fx("star", 3)
+            if not closing:
+                self.fx("star", 3)
         else:
+            closing = self._maybe_support_close_ritual()
             self.brain._set(State.SLEEP, random.randint(400, 800))
             self.roach.belly = False
             self.roach.target_alpha = 255
-            self.maybe_say("Zzz", chance=0.2)
+            if not closing:
+                self.maybe_say("Zzz", chance=0.2)
         self.right_dragging = True
         self.right_drag_start = (event.locationInWindow().x, event.locationInWindow().y)
 
@@ -4781,6 +6423,12 @@ class RoachPet:
     # ── 渲染 ──────────────────────────────────────────────
 
     def _draw_bubble(self):
+        # 引导步骤：自定义文案+按钮层（非阻塞）
+        if self._guide_active() and self._guide_step >= 0 and (
+            self._guide_lines or self._guide_choices
+        ):
+            self._draw_guide_panel()
+            return
         if not self.bubble:
             return
         text = self.bubble.text
@@ -4803,6 +6451,76 @@ class RoachPet:
         b.blit(rendered, (pad, pad))
         bx = max(2, min(WIN_W - b.get_width() - 2, (WIN_W - b.get_width()) // 2))
         self.canvas.blit(b, (bx, 4))
+
+    def _draw_guide_panel(self) -> None:
+        """首次引导：气泡文案 + 可点小按钮。"""
+        font = self.font_sm
+        lines = list(self._guide_lines or [])
+        choices = list(self._guide_choices or [])
+        pad = 6
+        gap = 4
+        max_w = WIN_W - 8
+        # 排版文案
+        renders = [font.render(t, True, (35, 35, 40)) for t in lines if t]
+        text_h = sum(r.get_height() for r in renders) + max(0, len(renders) - 1) * 2
+        # 按钮：每行最多 2 个
+        btn_rows: list[list[dict]] = []
+        row: list[dict] = []
+        for ch in choices:
+            row.append(ch)
+            if len(row) >= 2:
+                btn_rows.append(row)
+                row = []
+        if row:
+            btn_rows.append(row)
+        btn_h = 18
+        btns_h = len(btn_rows) * (btn_h + gap) if btn_rows else 0
+        bh = pad + text_h + (8 if btn_rows else 0) + btns_h + pad
+        bw = max_w
+        panel = pygame.Surface((bw, bh + 8), pygame.SRCALPHA)
+        alpha = 245
+        pygame.draw.rect(panel, (255, 255, 255, alpha), pygame.Rect(0, 0, bw, bh), border_radius=8)
+        pygame.draw.rect(panel, (150, 150, 155, alpha), pygame.Rect(0, 0, bw, bh), 1, border_radius=8)
+        y = pad
+        for r in renders:
+            x = max(pad, (bw - r.get_width()) // 2)
+            panel.blit(r, (x, y))
+            y += r.get_height() + 2
+        if btn_rows:
+            y += 4
+        self._guide_btn_rects = []
+        panel_x = max(2, (WIN_W - bw) // 2)
+        panel_y = 2
+        for brow in btn_rows:
+            n = len(brow)
+            slot_w = (bw - pad * 2 - gap * (n - 1)) // max(1, n)
+            x0 = pad
+            for ch in brow:
+                label = str(ch.get("label") or "")
+                cid = str(ch.get("id") or "")
+                tr = font.render(label, True, (40, 55, 80))
+                br = pygame.Rect(x0, y, slot_w, btn_h)
+                pygame.draw.rect(panel, (232, 240, 255, 255), br, border_radius=6)
+                pygame.draw.rect(panel, (120, 150, 200, 255), br, 1, border_radius=6)
+                panel.blit(
+                    tr,
+                    (
+                        br.x + max(2, (br.w - tr.get_width()) // 2),
+                        br.y + max(1, (br.h - tr.get_height()) // 2),
+                    ),
+                )
+                # 画布绝对坐标供点击
+                abs_r = pygame.Rect(panel_x + br.x, panel_y + br.y, br.w, br.h)
+                self._guide_btn_rects.append((abs_r, cid))
+                x0 += slot_w + gap
+            y += btn_h + gap
+        # 小三角
+        cx = bw // 2
+        pygame.draw.polygon(
+            panel, (255, 255, 255, alpha),
+            [(cx - 5, bh), (cx + 5, bh), (cx, bh + 7)],
+        )
+        self.canvas.blit(panel, (panel_x, panel_y))
 
     def paint(self):
         self.canvas.fill((0, 0, 0, 0))
@@ -4851,17 +6569,56 @@ class RoachPet:
         self._drain_commands()
         self.bubble = self.bubbles.tick()
 
+        self._check_meeting_silence()
+        self._check_onboarding_timeout()
+        if self._guide_active():
+            # 引导期间不抢戏：跳过主动喧哗；答谢气泡仍可 tick
+            if not busy:
+                self.x, self.y = self.brain.clamp(self.x, self.y)
+            sx, sy = self._screen_pos()
+            if IS_MAC and self.window is not None:
+                self._mac_place_window(sx, sy)
+            elif IS_WIN:
+                self._win_apply_pos()
+            self._update_mouse_passthrough()
+            self.paint()
+            self._refresh_view()
+            self.prev_x, self.prev_y = self.x, self.y
+            return
         self._check_hourly_chime()
         self._check_worker_schedule()
         self._check_worker_idle_nudge()
         self._check_sys_alerts()
         self._check_proactive()
+        self._check_autonomy()
         self._check_idle_showcase()
         self._check_rest_reminder()
+        self._check_care_reminders()
+        self._check_focus_pomodoro()
         self._check_buddy_banter()
+        self._watch_support_session()
         self._check_mouse_near(mx, my)
         self._check_mouse_seek(mx, my)
         self._maybe_finish_mouse_seek(mx, my)
+
+        if self._stealth:
+            # 收起期间仍更新脑回路，但不把窗口拉回前台
+            if not busy:
+                spd = math.hypot(self.brain.vx, self.brain.vy)
+                has_target = (
+                    self.brain.target_x is not None
+                    and math.hypot(
+                        self.x - self.brain.target_x,
+                        self.y - (self.brain.target_y or self.y),
+                    ) > 10
+                )
+                if spd <= 0.45 and not has_target:
+                    self.brain.vx = self.brain.vy = 0
+                self.x += self.brain.vx
+                self.y += self.brain.vy
+                self.x, self.y = self.brain.clamp(self.x, self.y)
+            self.prev_x, self.prev_y = self.x, self.y
+            return
 
         if not busy:
             # 无有效目标时清掉残余速度，避免坐姿微平移
@@ -4885,6 +6642,17 @@ class RoachPet:
 
         st = self.brain.state
         self.roach.belly = st == State.BELLY
+        # 倒挂：到达边缘后才翻转为挂着；移动途中保持正常
+        if st == State.HANG:
+            at_edge = (
+                self.brain.target_x is not None
+                and math.hypot(self.x - self.brain.target_x, self.y - (self.brain.target_y or self.y)) < 14
+            )
+            self.roach.hanging = bool(at_edge) or (
+                self.brain.target_x is None and self.brain.vx == 0 and self.brain.vy == 0
+            )
+        else:
+            self.roach.hanging = False
         hide_settled = False
         if st == State.HIDE:
             hide_settled = (
@@ -4893,6 +6661,10 @@ class RoachPet:
             )
             # 回窝仍清晰可见，略缩小表示趴下
             self.roach.target_scale = 0.94 if hide_settled else 1.0
+        elif st == State.CLIMB and not moving:
+            self.roach.target_scale = 0.96
+        elif st == State.HANG and self.roach.hanging:
+            self.roach.target_scale = 1.0
         self.roach.target_alpha = 255
         self.roach.alpha = 255
 
@@ -4929,8 +6701,7 @@ class RoachPet:
 
         sx, sy = self._screen_pos()
         if IS_MAC and self.window is not None:
-            self.window.setFrameOrigin_((sx, sy))
-            self.window.orderFrontRegardless()
+            self._mac_place_window(sx, sy)
         elif IS_WIN:
             self._win_apply_pos()
         self._update_mouse_passthrough()
@@ -4947,6 +6718,13 @@ class RoachPet:
     def _print_help_banner(self):
         print("习性: 平时角落趴窝，互动才跑出来；鼠标凑近会换窝")
         print("产品: 菜单栏/托盘 | Ctrl+Alt+R召唤 /总览 P穿透 S状态 Q退出")
+        if self.settings.get("simple_mode", True):
+            print("极简模式(默认): 菜单点 摸头/投喂/召唤/纸箱/睡觉；其余在「更多互动/设置」")
+            print("快捷键精简: N纸箱 K召唤 F投喂 H帮助 · 右键睡觉 · 上头摸 · Esc退出")
+            print("关闭极简: 菜单「关闭极简模式」可恢复全部快捷键与扁平菜单")
+            if IS_WIN:
+                print("Windows: 托盘在任务栏右下(可能在 ^ 里) | 显示桌面后会自动回来")
+            return
         if IS_WIN:
             print("Windows: 鼠标放在小猫上（或刚点过）按 N/C/Alt+M… 即可，不必点控制台")
             print("Windows: 托盘在任务栏右下(可能在 ^ 里) | 显示桌面后会自动回来")
@@ -4962,11 +6740,15 @@ class RoachPet:
         print("互动: 上头摸/下身逗 | 双击跑 | 连摸踩奶 | 滚轮转 | 右键睡 | 中键日期 | 方向键/空格")
         print("双宠: ,对喷  .开关会计猫 | Ctrl+Alt+B对喷")
         print("故事: T / Ctrl+Alt+T 故事大会 | 菜单开关休息提醒(约每小时)")
+        print("养生: 菜单开关养生提醒(护眼/喝水/伸展) | 切换养生节奏 gentle/standard/strict")
         print("寻访: 鼠标约30分钟不动会跑来找你互动 | 菜单可开关")
+        print("自主: 无人操作时散步/发呆/瞌睡/攀爬/倒挂 | 昼夜/专注/会议切换节奏 | 菜单可关")
+        print("会议静默: 共享/投屏收起 · 截图快捷键躲闪 | 菜单可关")
         print("AI: Ctrl+Alt+A开关 | 菜单切换厂商(deepseek/doubao/qwen) | secrets.json填Key")
         print("猫咪: N纸箱 C回窝 E打猎/毛线 Q观鸟 Z跑酷 V炸毛 O摆拍 X扑击")
         print("      U露肚 L激光 K召唤 M跟随 | -穿透 =皮肤 D日期 W天气 S状态 H帮助 Esc退出")
         print("      报时: 中键点小猫 或 菜单状态")
+        print("菜单可「开启极简模式」收起冷门快捷键")
 
     def run(self):
         if IS_MAC:
@@ -5002,7 +6784,6 @@ class RoachPet:
                     break
                 if ev.type == pygame.KEYDOWN:
                     if IS_WIN:
-                        # 字母/方向键由 WinFocusKeys(pynput) 处理；这里只收 Esc，避免双触发
                         if ev.key == pygame.K_ESCAPE:
                             self._persist()
                             if self._chrome is not None:
@@ -5012,6 +6793,15 @@ class RoachPet:
                                     pass
                             self._running = False
                             break
+                        # pynput 桥失败时回退 pygame 焦点键，与 Mac 本地键能力对齐
+                        chrome_ok = (
+                            self._chrome is not None
+                            and self._chrome.win_focus_keys_alive()
+                        )
+                        if not chrome_ok:
+                            if self._handle_pygame_key(ev):
+                                self._running = False
+                                break
                     elif self._handle_pygame_key(ev):
                         self._running = False
                         break

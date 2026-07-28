@@ -166,15 +166,23 @@ def generate_story_lines(settings: dict[str, Any]) -> list[str]:
     return lines[:6]
 
 
-def generate_banter_script(settings: dict[str, Any]) -> list[tuple[str, str]]:
-    """生成 main/buddy 交替 4 句对喷。"""
+def generate_banter_script(settings: dict[str, Any], support: bool = False) -> list[tuple[str, str]]:
+    """生成 main/buddy 交替 4 句对喷。support=True 时改为鼓励语气。"""
     _check_cooldown("banter")
     max_chars = 12
-    user = (
-        "写小猫主宠(main)与会计猫同伴(buddy)对喷，正好4句，交替发言，"
-        f"每句不超过{max_chars}字。题材不限财务，要好玩。"
-        "严格按格式每行: main|台词 或 buddy|台词。不要其它内容。"
-    )
+    if support:
+        user = (
+            "写小猫主宠(main)与会计猫同伴(buddy)互相鼓励的对话，正好4句，交替发言，"
+            f"每句不超过{max_chars}字。场景是月结/对账高压日："
+            "要温柔打气，禁止阴阳怪气、禁止催票催加班、禁止嘲笑压力。"
+            "严格按格式每行: main|台词 或 buddy|台词。不要其它内容。"
+        )
+    else:
+        user = (
+            "写小猫主宠(main)与会计猫同伴(buddy)对喷，正好4句，交替发言，"
+            f"每句不超过{max_chars}字。题材不限财务，要好玩。"
+            "严格按格式每行: main|台词 或 buddy|台词。不要其它内容。"
+        )
     text = chat_completion(
         [
             {"role": "system", "content": PERSONA},
@@ -198,5 +206,4 @@ def generate_banter_script(settings: dict[str, Any]) -> list[tuple[str, str]]:
             break
     if len(script) < 4:
         raise LLMError("对喷解析失败")
-    # 强制交替从 main 开始更好看
     return script[:4]

@@ -300,6 +300,90 @@ BANTER_SCRIPTS: list[list[tuple[str, str]]] = [
     ],
 ]
 
+# 月结/高压日：鼓励型对白（不调侃加班、不催票、不阴阳）
+SUPPORT_BANTER_SCRIPTS: list[list[tuple[str, str]]] = [
+    [
+        ("main", "好累..."),
+        ("buddy", "你已经很棒"),
+        ("main", "真的吗"),
+        ("buddy", "真的,歇口气"),
+    ],
+    [
+        ("main", "表还没平"),
+        ("buddy", "慢慢来,能平"),
+        ("main", "怕来不及"),
+        ("buddy", "一步一步来"),
+    ],
+    [
+        ("main", "月结好烦"),
+        ("buddy", "我陪着你"),
+        ("main", "谢谢猫"),
+        ("buddy", "喝口水再战"),
+    ],
+    [
+        ("main", "眼睛花了"),
+        ("buddy", "看远处20秒"),
+        ("main", "好"),
+        ("buddy", "护眼也是生产力"),
+    ],
+    [
+        ("main", "好想躺平"),
+        ("buddy", "合法摸鱼两分钟"),
+        ("main", "可以吗"),
+        ("buddy", "必须可以"),
+    ],
+    [
+        ("main", "又改数了"),
+        ("buddy", "深呼吸,再改"),
+        ("main", "心态崩了"),
+        ("buddy", "崩完还能站起来"),
+    ],
+    [
+        ("main", "今晚能睡吗"),
+        ("buddy", "能,留点力气"),
+        ("main", "还有一堆"),
+        ("buddy", "明天也有你"),
+    ],
+    [
+        ("main", "我行吗"),
+        ("buddy", "你一直很行"),
+        ("main", "夸我"),
+        ("buddy", "月结战士喵"),
+    ],
+    [
+        ("main", "咖啡续命"),
+        ("buddy", "也记得喝水"),
+        ("main", "嗯"),
+        ("buddy", "腰也要直一点"),
+    ],
+    [
+        ("main", "审计来了"),
+        ("buddy", "材料齐就稳"),
+        ("main", "紧张"),
+        ("buddy", "我给你加油"),
+    ],
+    [
+        ("main", "差一分"),
+        ("buddy", "找得到的"),
+        ("main", "头大"),
+        ("buddy", "摸摸头再找"),
+    ],
+    [
+        ("main", "别催我"),
+        ("buddy", "不催,只陪"),
+        ("main", "真好"),
+        ("buddy", "你先保存一下"),
+    ],
+]
+
+
+def pick_banter_script(support: bool = False) -> list[tuple[str, str]]:
+    """按情境抽取对喷脚本。"""
+    pool = SUPPORT_BANTER_SCRIPTS if support else BANTER_SCRIPTS
+    if not pool:
+        pool = BANTER_SCRIPTS
+    return list(random.choice(pool))
+
 
 class AccountantBuddy:
     """会计猫同伴：画在主窗口右侧槽，自己排队说话。"""
@@ -348,7 +432,7 @@ class AccountantBuddy:
         return self.active and (self.bantering or self.roach.alpha > 4)
 
     def start_banter(self, script: list[tuple[str, str]] | None = None) -> None:
-        script = list(script or random.choice(BANTER_SCRIPTS))
+        script = list(script or pick_banter_script(support=False))
         self._script = script
         self.bubbles.clear()
         self.roach.target_alpha = 255

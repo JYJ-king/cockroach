@@ -3,3 +3,5 @@ psutil>=5.9.0
 pynput>=1.7.6
 pillow>=10.0.0
 pyobjc-framework-Cocoa>=10.0
+# 可选：窗口标题检测「正在共享」更准；无此包时仍可用进程名检测
+pyobjc-framework-Quartz>=10.0

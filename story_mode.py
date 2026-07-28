@@ -133,6 +133,30 @@ REST_PHRASES: list[str] = [
     "该摸摸猫了",
 ]
 
+CARE_EYE_PHRASES: list[str] = [
+    "盯表久了,看远处20秒",
+    "20-20-20:看6米外20秒",
+    "眨眼!表格不会跑",
+    "眼睛酸了就远眺",
+    "抬头看窗外两眼",
+]
+
+CARE_WATER_PHRASES: list[str] = [
+    "起来接杯水",
+    "喝口水再对下一行",
+    "温水续命,别只续咖啡",
+    "补水!报销单不急这一秒",
+    "口渴了才喝就晚了",
+]
+
+CARE_STRETCH_PHRASES: list[str] = [
+    "站起来伸个懒腰",
+    "转转肩膀,别驼成虾",
+    "颈椎贷别越欠越多",
+    "活动手腕再敲键盘",
+    "久坐伤腰,起来晃晃",
+]
+
 
 SHOWCASE_PHRASES: list[str] = [
     "喵!",
@@ -190,6 +214,17 @@ def pick_story() -> list[str]:
 
 def pick_rest_line() -> str:
     return random.choice(REST_PHRASES)
+
+
+def pick_care_fallback(kind: str) -> str:
+    """内置养生话术回退（外置 packs/wellness.json 优先由调用方 PACKS.pick）。"""
+    pool = {
+        "eye": CARE_EYE_PHRASES,
+        "water": CARE_WATER_PHRASES,
+        "stretch": CARE_STRETCH_PHRASES,
+        "rest": REST_PHRASES,
+    }.get(kind, REST_PHRASES)
+    return random.choice(pool)
 
 
 def pick_showcase_line() -> str:

@@ -35,6 +35,7 @@ a = Analysis(
         'accountant_buddy',
         'story_mode',
         'llm_client',
+        'presence_guard',
     ],
     hookspath=[],
     hooksconfig={},
@@ -62,8 +63,8 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    # True: 保留控制台，便于看快捷键提示 / 报错
-    console=True,
+    # False: Windows 双击无黑框控制台（GitHub Actions / build_win.bat 同用此 spec）
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
