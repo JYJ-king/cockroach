@@ -572,12 +572,19 @@ class DesktopChrome:
         return int(stats.get("total") or 0)
 
     def _menu_label(self, title: str, cmd: str) -> str:
-        """动态菜单文案（误判反馈次数等）。"""
+        """动态菜单文案（误判反馈次数、养成状态等）。"""
         if cmd == "dismiss_buddy_support":
             n = self.support_feedback_count()
             if n > 0:
                 return f"这次不是月结(已记{n}次)"
             return "这次不是月结(取消应援)"
+        if cmd == "status":
+            try:
+                h = int((self.progress or {}).get("hunger", 100))
+                f = int((self.progress or {}).get("fatigue", 100))
+            except (TypeError, ValueError):
+                h, f = 100, 100
+            return f"状态(饥饿{h} 疲劳{f})"
         return title
 
     def rebuild_menus(self) -> None:
@@ -987,7 +994,10 @@ class DesktopChrome:
             return out
 
         if self._simple():
-            entries = [pystray.MenuItem(t, on(c)) for t, c in self._PRIMARY_SIMPLE]
+            entries = [
+                pystray.MenuItem(self._menu_label(t, c), on(c))
+                for t, c in self._PRIMARY_SIMPLE
+            ]
             entries += [
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("更多互动", pystray.Menu(*items_from(self._MORE_INTERACT))),
@@ -1004,7 +1014,7 @@ class DesktopChrome:
                 pystray.MenuItem("纸箱", on("box")),
                 pystray.MenuItem("睡觉", on("sleep")),
                 pystray.MenuItem("系统总览", on("overview")),
-                pystray.MenuItem("状态", on("status")),
+                pystray.MenuItem(self._menu_label("状态", "status"), on("status")),
                 pystray.Menu.SEPARATOR,
                 *items_from(self._MORE_SETTINGS),
                 pystray.Menu.SEPARATOR,

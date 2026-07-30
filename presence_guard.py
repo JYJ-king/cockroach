@@ -669,3 +669,238 @@ def routine_mode(respect_focus: bool = True, meeting_level: str = "") -> str:
     if period == "evening":
         return "quiet"
     return "active"
+
+
+# ── 前台应用：Excel / 网页（养成疲劳）──────────────────────
+
+EXCEL_PROCESS_HINTS = frozenset(
+    {
+        "excel",
+        "excel.exe",
+        "microsoft excel",
+        "et",
+        "et.exe",
+        "wps",
+        "wps.exe",
+        "wpsoffice",
+        "wpsoffice.exe",
+        "kingsoft",
+        "numbers",
+        "soffice",
+        "soffice.bin",
+        "libreoffice",
+    }
+)
+
+BROWSER_PROCESS_HINTS = frozenset(
+    {
+        "chrome",
+        "chrome.exe",
+        "google chrome",
+        "google chrome helper",
+        "msedge",
+        "msedge.exe",
+        "microsoft edge",
+        "firefox",
+        "firefox.exe",
+        "safari",
+        "brave",
+        "brave browser",
+        "brave.exe",
+        "opera",
+        "opera.exe",
+        "arc",
+        "vivaldi",
+        "vivaldi.exe",
+        "chromium",
+        "chromium.exe",
+        "edge",
+        "qqbrowser",
+        "qqbrowser.exe",
+        "360chrome",
+        "360chrome.exe",
+        "sogouexplorer",
+        "maxthon",
+    }
+)
+
+EXCEL_TITLE_HINTS = (
+    "excel",
+    ".xlsx",
+    ".xls",
+    ".xlsm",
+    "表格",
+    "microsoft excel",
+    "wps 表格",
+    "wps表格",
+    "numbers",
+    "libreoffice calc",
+)
+
+BROWSER_TITLE_HINTS = (
+    "google chrome",
+    "microsoft edge",
+    "mozilla firefox",
+    "safari",
+    "brave",
+    "chromium",
+    "opera",
+    "vivaldi",
+    " — chrome",
+    " - chrome",
+    " — edge",
+    " - edge",
+    " — mozilla",
+    "http://",
+    "https://",
+)
+
+_FG_CACHE: tuple[float, dict] = (0.0, {})
+
+
+def _hint_hit(text: str, hints: Iterable[str]) -> bool:
+    low = (text or "").lower()
+    if not low:
+        return False
+    for h in hints:
+        if h.lower() in low:
+            return True
+    return False
+
+
+def _classify_work_load(name: str, title: str) -> str:
+    """返回 '' | 'excel' | 'browser'。"""
+    nlow = (name or "").lower().strip()
+    nbase = nlow[:-4] if nlow.endswith(".exe") else nlow
+    if nlow in EXCEL_PROCESS_HINTS or nbase in EXCEL_PROCESS_HINTS:
+        return "excel"
+    if _hint_hit(title, EXCEL_TITLE_HINTS) or _hint_hit(nlow, EXCEL_TITLE_HINTS):
+        return "excel"
+    if nlow in BROWSER_PROCESS_HINTS or nbase in BROWSER_PROCESS_HINTS:
+        return "browser"
+    if _hint_hit(title, BROWSER_TITLE_HINTS) or _hint_hit(nlow, ("browser", "浏览器")):
+        return "browser"
+    return ""
+
+
+def _foreground_win() -> dict:
+    info = {"name": "", "title": "", "pid": 0, "kind": ""}
+    # 优先 pywin32（用户指定）；失败则 ctypes
+    try:
+        import win32gui  # type: ignore
+        import win32process  # type: ignore
+
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd:
+            return info
+        title = (win32gui.GetWindowText(hwnd) or "").strip()
+        _tid, pid = win32process.GetWindowThreadProcessId(hwnd)
+        name = ""
+        if pid and PSUTIL_OK:
+            try:
+                name = psutil.Process(int(pid)).name() or ""
+            except (psutil.Error, ValueError, TypeError):
+                name = ""
+        info.update(name=name, title=title, pid=int(pid or 0))
+        info["kind"] = _classify_work_load(name, title)
+        return info
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return info
+        length = user32.GetWindowTextLengthW(hwnd)
+        title = ""
+        if length > 0:
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = (buf.value or "").strip()
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        name = ""
+        if pid.value and PSUTIL_OK:
+            try:
+                name = psutil.Process(int(pid.value)).name() or ""
+            except (psutil.Error, ValueError, TypeError):
+                name = ""
+        info.update(name=name, title=title, pid=int(pid.value or 0))
+        info["kind"] = _classify_work_load(name, title)
+    except Exception:
+        return info
+    return info
+
+
+def _foreground_mac() -> dict:
+    info = {"name": "", "title": "", "pid": 0, "kind": ""}
+    try:
+        from AppKit import NSWorkspace
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return info
+        name = str(app.localizedName() or app.bundleIdentifier() or "")
+        pid = int(app.processIdentifier() or 0)
+        title = ""
+        try:
+            from Quartz import (
+                CGWindowListCopyWindowInfo,
+                kCGNullWindowID,
+                kCGWindowListOptionOnScreenOnly,
+                kCGWindowName,
+                kCGWindowOwnerPID,
+            )
+
+            arr = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or []
+            for item in arr:
+                try:
+                    opid = int(item.get(kCGWindowOwnerPID) or item.get("kCGWindowOwnerPID") or 0)
+                except Exception:
+                    opid = 0
+                if pid and opid != pid:
+                    continue
+                try:
+                    t = item.get(kCGWindowName) or item.get("kCGWindowName") or ""
+                except Exception:
+                    t = ""
+                if t:
+                    title = str(t)
+                    break
+        except Exception:
+            title = ""
+        info.update(name=name, title=title, pid=pid)
+        info["kind"] = _classify_work_load(name, title)
+    except Exception:
+        return info
+    return info
+
+
+def foreground_app_info(force: bool = False) -> dict:
+    """
+    前台窗口：进程名 + 标题。
+    返回 {name, title, pid, kind}；kind 为 '' | 'excel' | 'browser'。
+    缓存约 2 秒。
+    """
+    global _FG_CACHE
+    now = time.time()
+    ts, cached = _FG_CACHE
+    if not force and cached and now - ts < 2.0:
+        return dict(cached)
+    if IS_WIN:
+        info = _foreground_win()
+    elif IS_MAC:
+        info = _foreground_mac()
+    else:
+        info = {"name": "", "title": "", "pid": 0, "kind": ""}
+    _FG_CACHE = (now, dict(info))
+    return info
+
+
+def excel_or_browser_active(force: bool = False) -> bool:
+    """前台是否为 Excel/表格 或 网页浏览器（养成疲劳消耗）。"""
+    info = foreground_app_info(force=force)
+    return bool(info.get("kind") in ("excel", "browser"))

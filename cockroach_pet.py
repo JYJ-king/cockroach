@@ -67,6 +67,7 @@ from story_mode import (
 )
 from presence_guard import (
     detect_presence,
+    excel_or_browser_active,
     routine_mode as _presence_routine_mode,
     system_focus_active,
 )
@@ -2279,8 +2280,10 @@ class PetBrain:
         self.vx = self.vy = 0.0
         self.target_x: float | None = None
         self.target_y: float | None = None
+        # energy：动作层体力（睡觉恢复）；hunger/fatigue：养成条（100=满）
         self.energy = 80
-        self.hunger = 40
+        self.hunger = 100
+        self.fatigue = 100
         self.affection = 0
         self.floor_y = sh - ph
         self.follow = False
@@ -2356,12 +2359,16 @@ class PetBrain:
         self._pick_target()
 
     def react_feed(self, feast: bool = False):
-        cut = 55 if feast else 35
-        self.hunger = max(0, self.hunger - cut)
+        # 养成：每喂一次 +30 饱食（大餐同规则，额外回一点动作体力）
+        self.hunger = min(100, self.hunger + 30)
         self.energy = min(100, self.energy + (25 if feast else 15))
         self.affection += 4 if feast else 2
         self.pet_streak = 0
         self._set(State.HAPPY, 140 if feast else 100)
+
+    def react_nurture_pet(self, amount: int = 10):
+        """手动互动恢复疲劳（精力）。"""
+        self.fatigue = min(100, self.fatigue + max(0, int(amount)))
 
     def react_poke(self):
         self.pet_streak = 0
@@ -2511,7 +2518,6 @@ class PetBrain:
             return None
 
         self.state_timer -= 1
-        self.hunger = min(100, self.hunger + 0.008)
         bubble = None
 
         if self.state == State.HAPPY:
@@ -2575,8 +2581,8 @@ class PetBrain:
                 else:
                     self.vx, self.vy = dx / d * sp, dy / d * sp
             if self.state_timer <= 0:
-                # 找到一点吃的
-                self.hunger = max(0, self.hunger - 20)
+                # 找到一点吃的 → 回一点饱食
+                self.hunger = min(100, self.hunger + 20)
                 self.energy = min(100, self.energy + 8)
                 self._set(State.HAPPY, 80)
                 bubble = Bubble(random.choice(["找到了!", "嚼嚼~", "有收获!"]))
@@ -2835,6 +2841,9 @@ class RoachPet:
         sw, sh = get_desktop_size()
         self.brain = PetBrain(sw, sh, WIN_W, WIN_H)
         self.brain.affection = int(self.progress.get("affection") or 0)
+        self._nurture_dying_said = False
+        self._nurture_quit_armed = False
+        self._load_nurture_from_progress()
         if self.settings.get("follow_default"):
             self.brain.follow = True
         skin = str(self.settings.get("skin") or "default")
@@ -2880,6 +2889,7 @@ class RoachPet:
         self._last_hour_chime = -1
         self._worker_fired: set[str] = set()
         iv = float(self.settings.get("interaction_interval_sec") or 300)
+        self._next_nurture = time.time() + 60.0
         self._next_proactive = time.time() + random.uniform(iv * 1.2, iv * 2.0)
         self._next_worker_idle = time.time() + 300
         lo_sc = float(self.settings.get("idle_showcase_min") or iv * 0.9)
@@ -3807,9 +3817,141 @@ class RoachPet:
 
     def _persist(self):
         self.progress["affection"] = int(self.brain.affection)
+        self._sync_nurture_to_progress()
         self.settings["skin"] = getattr(self.roach, "skin", "default")
         save_settings(self.app_root, self.settings)
         save_progress(self.app_root, self.progress)
+
+    def _load_nurture_from_progress(self) -> None:
+        """从 progress 灌入养成条；旧存档缺字段时按满值起步。"""
+        try:
+            h = int(self.progress.get("hunger", 100))
+        except (TypeError, ValueError):
+            h = 100
+        try:
+            f = int(self.progress.get("fatigue", 100))
+        except (TypeError, ValueError):
+            f = 100
+        self.brain.hunger = max(0, min(100, h))
+        self.brain.fatigue = max(0, min(100, f))
+        self._nurture_roll_day(persist=False)
+
+    def _sync_nurture_to_progress(self) -> None:
+        self.progress["hunger"] = int(max(0, min(100, round(self.brain.hunger))))
+        self.progress["fatigue"] = int(max(0, min(100, round(self.brain.fatigue))))
+        today = datetime.now().strftime("%Y-%m-%d")
+        if not self.progress.get("fatigue_day"):
+            self.progress["fatigue_day"] = today
+
+    def _nurture_roll_day(self, persist: bool = True) -> bool:
+        """跨日：疲劳恢复满值 100；饥饿保持。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        prev = str(self.progress.get("fatigue_day") or "")
+        if prev == today:
+            return False
+        self.brain.fatigue = 100
+        self.progress["fatigue_day"] = today
+        self.progress["fatigue"] = 100
+        self._nurture_dying_said = False
+        self._nurture_quit_armed = False
+        if persist:
+            self._sync_nurture_to_progress()
+            save_progress(self.app_root, self.progress)
+        return True
+
+    def _nurture_vitality(self) -> int:
+        return int(min(self.brain.hunger, self.brain.fatigue))
+
+    def _interaction_scale(self) -> float | None:
+        """
+        按 min(饥饿,疲劳) 缩放主动互动间隔。
+        返回倍数；None 表示低于 20，停止主动互动。
+        """
+        v = self._nurture_vitality()
+        if v < 20:
+            return None
+        if v >= 60:
+            return 1.0
+        if v >= 50:
+            return 1.5
+        if v >= 40:
+            return 2.0
+        # 20–40：×3（含用户写的 30–40；20–30 同档）
+        return 3.0
+
+    def _scaled_interval(self, base: float) -> float | None:
+        mul = self._interaction_scale()
+        if mul is None:
+            return None
+        return max(30.0, float(base) * mul)
+
+    def _nurture_mood_line(self) -> str | None:
+        """低于 60 时吐槽饿/累。"""
+        h, f = int(self.brain.hunger), int(self.brain.fatigue)
+        v = min(h, f)
+        if v >= 60:
+            return None
+        if v < 20:
+            return random.choice(
+                ["快不行了...", "濒死中...", "要饿晕/累趴了...", "救救猫..."]
+            )
+        hungry = h < 60
+        tired = f < 60
+        if hungry and tired:
+            return random.choice(["又饿又累...", "求投喂+摸摸", "状态很差喵"])
+        if hungry:
+            return random.choice(["好饿...", "小鱼干呢?", "肚子咕咕叫", "投喂救急"])
+        return random.choice(["好累...", "对着表/网页耗尽了", "摸摸回血", "想趴会儿"])
+
+    def _recover_fatigue(self, amount: int = 10) -> None:
+        self.brain.react_nurture_pet(amount)
+        self._sync_nurture_to_progress()
+        if self._nurture_vitality() >= 20:
+            self._nurture_dying_said = False
+            self._nurture_quit_armed = False
+
+    def _check_nurture(self) -> None:
+        """每分钟：饥饿 -1；前台 Excel/网页时疲劳 -1；跨日疲劳回满；濒死/退出。"""
+        now = time.time()
+        if now < getattr(self, "_next_nurture", 0):
+            return
+        self._next_nurture = now + 60.0
+        self._nurture_roll_day(persist=False)
+        self.brain.hunger = max(0, self.brain.hunger - 1)
+        if excel_or_browser_active():
+            self.brain.fatigue = max(0, self.brain.fatigue - 1)
+        self._sync_nurture_to_progress()
+
+        v = self._nurture_vitality()
+        if self._chrome is not None:
+            try:
+                self._chrome.rebuild_menus()
+            except Exception:
+                pass
+        if v < 10:
+            if not self._nurture_quit_armed:
+                self._nurture_quit_armed = True
+                self.say("撑不住了...先撤了", urgent=True, life=160)
+                self.fx("dust", 8)
+                # 下一 tick 再退，让气泡有机会画出来
+                self._next_nurture = now + 1.2
+            else:
+                self.stop()
+            return
+        if v < 20:
+            if not self._nurture_dying_said or random.random() < 0.35:
+                self._nurture_dying_said = True
+                line = self._nurture_mood_line() or "濒死中..."
+                if not (self.bubbles.current or self.bubbles._q):
+                    self.say(line, urgent=True, life=130)
+                    self.fx("dust", 3)
+            # 视觉：略缩身
+            self.roach.target_scale = min(self.roach.target_scale, 0.88)
+        elif v < 60 and random.random() < 0.2:
+            if not (self.bubbles.current or self.bubbles._q) and not self._stealth:
+                line = self._nurture_mood_line()
+                if line:
+                    self.maybe_say(line, chance=1.0)
 
     def _note_progress(self, **kwargs):
         for k, v in kwargs.items():
@@ -4089,6 +4231,7 @@ class RoachPet:
     def do_pet_head(self):
         """菜单摸头：等同点猫头。"""
         self._note_user_act()
+        self._recover_fatigue(10)
         self.brain.react_click()
         self.roach.target_alpha = 255
         self.roach.target_scale = 1.08
@@ -4250,9 +4393,18 @@ class RoachPet:
             self._start_weather_fetch()
 
     def say_status(self):
-        e, h = int(self.brain.energy), int(self.brain.hunger)
+        h, f = int(self.brain.hunger), int(self.brain.fatigue)
         aff = int(self.brain.affection)
-        mood = "饿" if h > 70 else ("困" if e < 30 else "精神")
+        v = min(h, f)
+        if v < 20:
+            mood = "濒死"
+        elif v < 60:
+            if h <= f:
+                mood = "很饿"
+            else:
+                mood = "很累"
+        else:
+            mood = "精神"
         hide = "趴窝" if self.brain.state == State.HIDE else "在外面"
         extra = ""
         if self._stealth:
@@ -4270,7 +4422,7 @@ class RoachPet:
             n = int((self.progress.get("support_fp_stats") or {}).get("total") or 0)
             if n > 0:
                 extra = f" 误判反馈{n}次"
-        self.say(f"{mood} {hide} 亲密度{aff}{extra}", urgent=True)
+        self.say(f"{mood} 饥饿{h} 疲劳{f} {hide} 亲密度{aff}{extra}", urgent=True)
 
     def say_sys_cpu(self):
         self.roach.target_alpha = 255
@@ -5144,20 +5296,33 @@ class RoachPet:
         if now < self._next_proactive:
             return
         iv = float(self.settings.get("interaction_interval_sec") or 300)
-        self._next_proactive = now + random.uniform(iv * 1.2, iv * 2.0)
+        scaled = self._scaled_interval(iv)
+        if scaled is None:
+            # 濒死：不再主动互动（濒死嘀咕由 _check_nurture 负责）
+            self._next_proactive = now + 90.0
+            return
+        self._next_proactive = now + random.uniform(scaled * 1.2, scaled * 2.0)
         if self.brain.state in (State.SLEEP, State.DRAGGED, State.RUN, State.FOLLOW, State.LASER):
             return
         if self.bubbles.current or self.bubbles._q:
             return
+        mood = self._nurture_mood_line()
         # 趴窝时几乎不主动出来，顶多嘀咕一声
         if self.brain.state == State.HIDE:
             if random.random() < 0.4 and is_workday():
+                if mood and random.random() < 0.55:
+                    self.say(mood, life=120)
+                    return
                 use_fin = self.settings.get("finance_reminders", True) and random.random() < 0.55
                 use_work = self.settings.get("worker_reminders", True)
                 if use_fin:
                     self.say(finance_random_tip(self.settings, support=self._buddy_support_active()), life=120)
                 elif use_work:
                     self.say(worker_random_tip(), life=120)
+            return
+        if mood and random.random() < 0.45:
+            self.say(mood, life=140)
+            self.fx("star", 2)
             return
         r = random.random()
         if r < 0.15:
@@ -5186,7 +5351,12 @@ class RoachPet:
             return
         lo = float(self.settings.get("idle_showcase_min") or 45)
         hi = float(self.settings.get("idle_showcase_max") or 90)
-        self._next_showcase = now + random.uniform(min(lo, hi), max(lo, hi))
+        base = random.uniform(min(lo, hi), max(lo, hi))
+        scaled = self._scaled_interval(base)
+        if scaled is None:
+            self._next_showcase = now + 120.0
+            return
+        self._next_showcase = now + scaled
         if self.dragging or self.right_dragging:
             return
         if self.buddy and self.buddy.bantering:
@@ -5196,12 +5366,16 @@ class RoachPet:
         if self.bubbles.current or self.bubbles._q:
             return
 
-        pool = (
-            list(PACKS.pool("chat", []))
-            + Bubble.CHAT_PHRASES[:12]
-            + [pick_showcase_line() for _ in range(3)]
-        )
-        line = random.choice(pool) if pool else pick_showcase_line()
+        mood = self._nurture_mood_line()
+        if mood and random.random() < 0.4:
+            line = mood
+        else:
+            pool = (
+                list(PACKS.pool("chat", []))
+                + Bubble.CHAT_PHRASES[:12]
+                + [pick_showcase_line() for _ in range(3)]
+            )
+            line = random.choice(pool) if pool else pick_showcase_line()
 
         def apply_line(text: str):
             if self.brain.state == State.HIDE:
@@ -5552,15 +5726,17 @@ class RoachPet:
     def do_feed(self, feast: bool = False):
         self._note_user_act()
         self.brain.react_feed(feast=feast)
+        self._sync_nurture_to_progress()
         self.roach.target_scale = 1.18 if feast else 1.12
         self.roach.belly = False
         self.roach.force_anim("waving", 2.5)
         self.fx("crumb", 12 if feast else 8)
         self._note_progress(feed_count=1)
+        h = int(self.brain.hunger)
         if feast:
-            self.say(random.choice(["大餐!", "撑住了", "罐头幸福!", "小鱼干雨!"]), urgent=True)
+            self.say(random.choice(["大餐!", "撑住了", "罐头幸福!", "小鱼干雨!", f"饥饿{h}"]), urgent=True)
         else:
-            self.maybe_say(random.choice(Bubble.FEED_PHRASES), chance=0.35)
+            self.maybe_say(random.choice(list(Bubble.FEED_PHRASES) + [f"饥饿{h}"]), chance=0.45)
 
     def do_dance(self):
         self.brain.react_dance()
@@ -6077,11 +6253,18 @@ class RoachPet:
             self._next_care[kind] = now + max(120.0, civ)
         lo_sc = float(self.settings.get("idle_showcase_min") or iv * 0.9)
         hi_sc = float(self.settings.get("idle_showcase_max") or iv * 1.1)
-        self._next_showcase = now + random.uniform(min(lo_sc, hi_sc), max(lo_sc, hi_sc))
+        sc_base = random.uniform(min(lo_sc, hi_sc), max(lo_sc, hi_sc))
+        sc = self._scaled_interval(sc_base)
+        self._next_showcase = now + (sc if sc is not None else 120.0)
         lo_au = float(self.settings.get("autonomy_min") or iv * 0.9)
         hi_au = float(self.settings.get("autonomy_max") or iv * 1.1)
-        self._next_autonomy = now + random.uniform(min(lo_au, hi_au), max(lo_au, hi_au))
-        self._next_proactive = now + random.uniform(iv * 1.2, iv * 2.0)
+        au_base = random.uniform(min(lo_au, hi_au), max(lo_au, hi_au))
+        au = self._scaled_interval(au_base)
+        self._next_autonomy = now + (au if au is not None else 120.0)
+        pr = self._scaled_interval(iv)
+        self._next_proactive = now + (
+            random.uniform(pr * 1.2, pr * 2.0) if pr is not None else 120.0
+        )
         lo_b = float(self.settings.get("buddy_banter_min") or 120)
         hi_b = float(self.settings.get("buddy_banter_max") or 280)
         self._next_banter = now + random.uniform(min(lo_b, hi_b), max(lo_b, hi_b))
@@ -6105,7 +6288,12 @@ class RoachPet:
             return
         lo = float(self.settings.get("autonomy_min") or 50)
         hi = float(self.settings.get("autonomy_max") or 120)
-        self._next_autonomy = now + random.uniform(min(lo, hi), max(lo, hi))
+        base = random.uniform(min(lo, hi), max(lo, hi))
+        scaled = self._scaled_interval(base)
+        if scaled is None:
+            self._next_autonomy = now + 120.0
+            return
+        self._next_autonomy = now + scaled
 
         idle_need = float(self.settings.get("autonomy_idle_sec") or 45)
         if now - self._last_user_act < max(15.0, idle_need):
@@ -6585,6 +6773,8 @@ class RoachPet:
             self.fx("star", 5)
             self.maybe_say(random.choice(["冲!", "跑酷!", "喵闪!", "起飞!"]), chance=0.3)
         elif head_side:
+            self._note_user_act()
+            self._recover_fatigue(10)
             self.brain.react_click()
             self.roach.target_scale = 1.08
             self.roach.force_anim("waving", 2.0)
@@ -6965,6 +7155,7 @@ class RoachPet:
         self._check_meeting_silence()
         self._check_focus_pomodoro()
         self._update_quiet_gate()
+        self._check_nurture()
         self._check_onboarding_timeout()
         if self._guide_active():
             # 引导期间不抢戏：跳过主动喧哗；答谢气泡仍可 tick
@@ -7107,6 +7298,7 @@ class RoachPet:
         if now >= getattr(self, "_next_persist", 0):
             self._next_persist = now + 90
             self.progress["affection"] = int(self.brain.affection)
+            self._sync_nurture_to_progress()
             save_progress(self.app_root, self.progress)
 
     def _print_help_banner(self):

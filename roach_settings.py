@@ -112,6 +112,10 @@ DEFAULT_PROGRESS: dict[str, Any] = {
     "titles": [],
     "unlocked_skins": ["default"],
     "stats": {},
+    # 养成：饱食度 / 精力（均为 100=满；跨天饥饿保留，疲劳按日复位）
+    "hunger": 100,
+    "fatigue": 100,
+    "fatigue_day": "",  # YYYY-MM-DD，跨日把 fatigue 重置为 100
     # 首次启动气泡引导是否完成（兼容旧键 onboarding_done）
     "onboarding_completed": False,
     "onboarding_done": False,
