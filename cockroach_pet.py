@@ -952,6 +952,52 @@ FINANCE_TIPS = [
     "对账不平先别慌,逐步缩小范围",
 ]
 
+# 财务脏话 / 职场吐槽（偏辣口、办公室可用；月结应援模式不主动触发）
+FINANCE_SWEAR = [
+    "这差额谁造的孽",
+    "串户了你自己改!",
+    "没有票就别找我哭",
+    "口头答应能抵税吗?",
+    "预算外还敢甩过来",
+    "反结账是要人命的",
+    "月结周别来添乱!",
+    "这发票开得什么鬼",
+    "专票普票都分不清",
+    "三单不全想付款?做梦",
+    "附件缺三件套还催我",
+    "重复报销滚回去!",
+    "这科目选的我血压升高",
+    "借贷不平你跟我扯闭环",
+    "关账了别再提需求!",
+    "审计问到你头上别怨我",
+    "底稿呢?底稿呢?!",
+    "函证不回你自己解释",
+    "公私款混一起很勇啊",
+    "备用金核销拖到猴年",
+    "税负率乱蹦别怪我骂人",
+    "别教我做假账谢谢",
+    "利润不是调账调出来的",
+    "滞纳金你想尝鲜?",
+    "税局通知已读不回很刺激",
+    "超标报销还理直气壮",
+    "老板口头批不算数!",
+    "费用归属乱甩我头上",
+    "进项过期了你哭去",
+    "视同销售漏了自己补",
+    "银企对不上别催付款",
+    "未达账项堆成山了",
+    "凭证审核一塌糊涂",
+    "回单隔夜归档你试试",
+    "往来核对你当空气?",
+    "账平不了别说对齐",
+    "这叫什么合规快乐",
+    "饼画完了税呢?",
+    "共享中心不是垃圾桶",
+    "差一分也要查到你怀疑人生",
+    "这需求过不了我这关",
+    "对账不平先别吼我",
+]
+
 WORKER_TIPS_WEEKDAY = [
     "工资虽薄,身体要厚",
     "需求又改?先深呼吸",
@@ -1099,15 +1145,34 @@ def worker_random_tip() -> str:
     return PACKS.pick("worker_tips_weekday", WORKER_TIPS_WEEKDAY)
 
 
-def finance_buzzword() -> str:
-    """财务行话 / 口头禅混合。"""
+def finance_buzzword(settings: dict | None = None, *, support: bool = False) -> str:
+    """财务行话 / 口头禅混合；开启脏话时偶尔夹一句辣口（应援模式不加脏话）。"""
+    if (
+        not support
+        and settings is not None
+        and settings.get("finance_swear", True)
+        and random.random() < 0.18
+    ):
+        return finance_swear_line()
     if random.random() < 0.55:
         return PACKS.pick("finance_catchphrases", FINANCE_CATCHPHRASES)
     return PACKS.pick("finance_buzz", FINANCE_BUZZ)
 
 
-def finance_random_tip() -> str:
-    """财务专属提醒（含口头禅）。"""
+def finance_swear_line() -> str:
+    """财务脏话 / 职场吐槽专场。"""
+    return PACKS.pick("finance_swear", FINANCE_SWEAR)
+
+
+def finance_random_tip(settings: dict | None = None, *, support: bool = False) -> str:
+    """财务专属提醒（含口头禅）；可夹脏话（应援模式不加）。"""
+    if (
+        not support
+        and settings is not None
+        and settings.get("finance_swear", True)
+        and random.random() < 0.12
+    ):
+        return finance_swear_line()
     r = random.random()
     if r < 0.4:
         return PACKS.pick("finance_catchphrases", FINANCE_CATCHPHRASES)
@@ -3802,6 +3867,13 @@ class RoachPet:
             self.settings["finance_reminders"] = not self.settings.get("finance_reminders", True)
             save_settings(self.app_root, self.settings)
             self.say("财务提醒开" if self.settings["finance_reminders"] else "财务提醒关", urgent=True)
+        elif cmd == "toggle_finance_swear":
+            self.settings["finance_swear"] = not self.settings.get("finance_swear", True)
+            save_settings(self.app_root, self.settings)
+            on = self.settings["finance_swear"]
+            self.say("财务脏话开" if on else "财务脏话关", urgent=True)
+        elif cmd == "finance_swear":
+            self.say_finance_swear()
         elif cmd == "toggle_sys":
             self.settings["sys_alerts"] = not self.settings.get("sys_alerts", True)
             save_settings(self.app_root, self.settings)
@@ -4255,14 +4327,29 @@ class RoachPet:
 
     def say_finance_buzz(self):
         """财务人员黑话 / 口头禅专场。"""
-        self.say(finance_buzzword(), urgent=True, life=150)
+        support = self._buddy_support_active()
+        self.say(finance_buzzword(self.settings, support=support), urgent=True, life=150)
         self.roach.target_alpha = 255
         self.brain._set(State.GREET, 60)
         self.fx("crumb", 4)
 
+    def say_finance_swear(self):
+        """财务脏话专场：手动喷一句；应援模式改鼓励。"""
+        self.roach.target_alpha = 255
+        if self._buddy_support_active():
+            self.say("应援中·先不骂人,你已经很棒", urgent=True, life=140)
+            self.fx("heart", 3)
+            self.brain._set(State.HAPPY, 70)
+            return
+        self.say(finance_swear_line(), urgent=True, life=160)
+        self.brain._set(State.CURIOUS, 80)
+        self.fx("dust", 5)
+        self.fx("crumb", 3)
+
     def say_finance_tip(self):
         """财务专属提醒。"""
-        self.say(finance_random_tip(), urgent=True, life=170)
+        support = self._buddy_support_active()
+        self.say(finance_random_tip(self.settings, support=support), urgent=True, life=170)
         self.roach.target_alpha = 255
         self.brain._set(State.GREET, 70)
         self.fx("star", 3)
@@ -5044,7 +5131,7 @@ class RoachPet:
             elif 9 <= now.hour <= 20 and random.random() < 0.45:
                 pick = random.random()
                 if pick < 0.4 and self.settings.get("finance_reminders", True):
-                    self.say(finance_random_tip(), life=130)
+                    self.say(finance_random_tip(self.settings, support=self._buddy_support_active()), life=130)
                 elif pick < 0.7 and self.settings.get("worker_reminders", True):
                     self.say(worker_buzzword(), life=130)
                 elif self.settings.get("worker_reminders", True):
@@ -5068,7 +5155,7 @@ class RoachPet:
                 use_fin = self.settings.get("finance_reminders", True) and random.random() < 0.55
                 use_work = self.settings.get("worker_reminders", True)
                 if use_fin:
-                    self.say(finance_random_tip(), life=120)
+                    self.say(finance_random_tip(self.settings, support=self._buddy_support_active()), life=120)
                 elif use_work:
                     self.say(worker_random_tip(), life=120)
             return
@@ -5079,7 +5166,7 @@ class RoachPet:
         elif r < 0.3:
             self.brain._set(State.CURIOUS, 90)
         elif r < 0.55 and is_workday() and self.settings.get("finance_reminders", True):
-            self.say(finance_random_tip(), life=150)
+            self.say(finance_random_tip(self.settings, support=self._buddy_support_active()), life=150)
             self.fx("star", 3)
         elif r < 0.75 and is_workday() and self.settings.get("worker_reminders", True):
             self.say(worker_random_tip(), life=150)
@@ -6199,6 +6286,7 @@ class RoachPet:
             "9": self.do_tax_check,
             "0": self.do_payroll_day,
             ";": self.say_finance_tip,
+            "p": self.say_finance_swear,
             "/": self.say_sys_overview,
             "[": self.say_sys_cpu,
             "]": self.say_sys_mem,
@@ -7046,7 +7134,7 @@ class RoachPet:
         print("设置: settings.json（气泡/提醒/穿透/话术包/皮肤）")
         print("打工: G提醒 J黑话混 Y对齐 | 1站会 2复盘 3摸鱼 4反PUA")
         print("监控: /总览  [CPU  ]内存  \\磁盘  '网络  (需 psutil)")
-        print("财务: 5行话口头禅 6月结 7审计 8报销 9税务 0发薪 ;财务提醒")
+        print("财务: 5行话口头禅 6月结 7审计 8报销 9税务 0发薪 ;财务提醒 P财务脏话")
         print("互动: 上头摸/下身逗 | 双击跑 | 连摸踩奶 | 滚轮转 | 右键睡 | 中键日期 | 方向键/空格")
         print("双宠: ,对喷  .开关会计猫 | Ctrl+Alt+B对喷")
         print("故事: T / Ctrl+Alt+T 故事大会 | 菜单开关休息提醒(约每小时)")

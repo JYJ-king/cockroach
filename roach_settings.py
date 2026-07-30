@@ -12,6 +12,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "bubbles_enabled": True,
     "worker_reminders": True,
     "finance_reminders": True,
+    # 财务脏话：菜单/快捷键可喷；也可夹进行话池（应援模式不夹）
+    "finance_swear": True,
     "sys_alerts": True,
     "sys_check_interval_min": 50,
     "sys_check_interval_max": 90,

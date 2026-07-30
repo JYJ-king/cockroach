@@ -532,6 +532,7 @@ class DesktopChrome:
         ("舔毛", "cat_groom"),
         None,
         ("会计对喷", "banter"),
+        ("财务脏话", "finance_swear"),
         ("故事大会", "story"),
         ("系统总览", "overview"),
     )
@@ -541,6 +542,7 @@ class DesktopChrome:
         ("切换气泡", "toggle_bubbles"),
         ("切换打工提醒", "toggle_worker"),
         ("切换财务提醒", "toggle_finance"),
+        ("开关财务脏话", "toggle_finance_swear"),
         ("切换系统告警", "toggle_sys"),
         None,
         ("下一个皮肤", "next_skin"),

@@ -28,6 +28,7 @@ CATEGORY_KEYS = (
     "finance_reimburse",
     "finance_tax",
     "finance_payroll",
+    "finance_swear",
     "programmer_buzz",
     "festival",
     "chat",
