@@ -565,9 +565,6 @@ class DesktopChrome:
         ("显示称号", "titles"),
         ("重载话术包", "reload_packs"),
         ("重新开始引导", "replay_onboarding"),
-        None,
-        ("调试养成:下一档", "nurture_debug_next"),
-        ("调试养成:恢复满值", "nurture_debug_recover"),
     )
 
     def support_feedback_count(self) -> int:

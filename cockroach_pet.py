@@ -2890,8 +2890,6 @@ class RoachPet:
         self._worker_fired: set[str] = set()
         iv = float(self.settings.get("interaction_interval_sec") or 300)
         self._next_nurture = time.time() + 60.0
-        self._nurture_debug_freeze = False
-        self._nurture_debug_idx = -1
         self._next_proactive = time.time() + random.uniform(iv * 1.2, iv * 2.0)
         self._next_worker_idle = time.time() + 300
         lo_sc = float(self.settings.get("idle_showcase_min") or iv * 0.9)
@@ -3941,23 +3939,6 @@ class RoachPet:
             return
         self._next_nurture = now + 60.0
         self._nurture_roll_day(persist=False)
-        # 调试冻结：不掉点、不因过低退出，方便逐档观察
-        if getattr(self, "_nurture_debug_freeze", False):
-            self._sync_nurture_to_progress()
-            v = self._nurture_vitality()
-            if self._chrome is not None:
-                try:
-                    self._chrome.rebuild_menus()
-                except Exception:
-                    pass
-            if v < 20 and (not self._nurture_dying_said or random.random() < 0.25):
-                self._nurture_dying_said = True
-                line = self._nurture_mood_line() or "濒死中..."
-                if not (self.bubbles.current or self.bubbles._q):
-                    self.say(f"[调试]{line}", urgent=True, life=120)
-                    self.fx("dust", 2)
-                self.roach.target_scale = min(self.roach.target_scale, 0.88)
-            return
         self.brain.hunger = max(0, self.brain.hunger - 1)
         if excel_or_browser_active():
             self.brain.fatigue = max(0, self.brain.fatigue - 1)
@@ -3993,122 +3974,6 @@ class RoachPet:
                 line = self._nurture_mood_line()
                 if line:
                     self.maybe_say(line, chance=1.0)
-
-    # 调试档：饥饿=疲劳=该值；1 用于测 <10 退出；100 为恢复满值
-    _NURTURE_DEBUG_STAGES = (90, 60, 50, 40, 30, 20, 10, 1, 100)
-
-    def _nurture_stage_desc(self, level: int) -> str:
-        """一句话说明该档预期互动效果（调试用）。"""
-        iv = float(self.settings.get("interaction_interval_sec") or 300)
-        if level >= 100:
-            return f"恢复满值 饥饿100 疲劳100 | 间隔×1 (~{int(iv)}s) | 正常互动"
-        if level < 10:
-            return f"活力{level} | <10 → 约1.5秒后退出（本档不冻结掉点）"
-        if level < 20:
-            return f"活力{level} | 停止主动互动+濒死缩身嘀咕（=10仍濒死；<10才退出）"
-        if level >= 60:
-            mul = 1.0
-            mood = "无饿累吐槽"
-        elif level >= 50:
-            mul = 1.5
-            mood = "吐槽很饿/很累"
-        elif level >= 40:
-            mul = 2.0
-            mood = "吐槽很饿/很累"
-        else:
-            mul = 3.0
-            mood = "吐槽很饿/很累"
-        return (
-            f"活力{level} | 间隔×{mul:g} (~{int(iv * mul)}s) | {mood} | 主动表演仍开"
-        )
-
-    def debug_nurture_set(self, level: int) -> None:
-        """把饥饿与疲劳设为同一档并立刻演示互动效果。"""
-        level = int(level)
-        now = time.time()
-        if level >= 100:
-            self.brain.hunger = 100
-            self.brain.fatigue = 100
-            self._nurture_debug_freeze = False
-            self._nurture_dying_said = False
-            self._nurture_quit_armed = False
-            self.roach.target_scale = 1.0
-            self._sync_nurture_to_progress()
-            save_progress(self.app_root, self.progress)
-            # 恢复后立刻安排一轮主动互动，便于对比
-            self._next_proactive = now + 2.0
-            self._next_showcase = now + 3.0
-            self._next_autonomy = now + 4.0
-            desc = self._nurture_stage_desc(100)
-            self.say(f"[调试恢复] {desc}", urgent=True, life=220)
-            self.fx("star", 6)
-            self.brain._set(State.HAPPY, 90)
-            if self._chrome is not None:
-                try:
-                    self._chrome.rebuild_menus()
-                except Exception:
-                    pass
-            return
-
-        level = max(0, min(99, level))
-        self.brain.hunger = level
-        self.brain.fatigue = level
-        self._nurture_dying_said = False
-        self._nurture_quit_armed = False
-        self._sync_nurture_to_progress()
-        save_progress(self.app_root, self.progress)
-
-        desc = self._nurture_stage_desc(level)
-        self.say(f"[调试] {desc}", urgent=True, life=240)
-        mood = self._nurture_mood_line()
-        if mood:
-            self.bubbles.push(f"→ {mood}", 160)
-
-        if level < 10:
-            # 测退出：不冻结，尽快走 _check_nurture 的 <10 退出路径
-            self._nurture_debug_freeze = False
-            self.roach.target_scale = 0.88
-            self.fx("dust", 5)
-            self.brain.go_hide()
-            self._next_proactive = now + 99999
-            self._next_showcase = now + 99999
-            self._next_autonomy = now + 99999
-            self._next_nurture = now + 1.5
-        elif level < 20:
-            self._nurture_debug_freeze = True
-            self.roach.target_scale = 0.88
-            self.fx("dust", 5)
-            self.brain.go_hide()
-            self._next_proactive = now + 99999
-            self._next_showcase = now + 99999
-            self._next_autonomy = now + 99999
-        else:
-            self._nurture_debug_freeze = True  # 冻结掉点，避免调试时滑档
-            self.roach.target_scale = 1.0
-            self.fx("star", 3)
-            self._next_proactive = now + 2.5
-            self._next_showcase = now + 5.0
-            self._next_autonomy = now + 8.0
-            if self.brain.state == State.HIDE:
-                self.brain._set(State.GREET, 80)
-        if self._chrome is not None:
-            try:
-                self._chrome.rebuild_menus()
-            except Exception:
-                pass
-
-    def debug_nurture_next(self) -> None:
-        """循环：90→60→50→40→30→20→10→恢复100。"""
-        stages = self._NURTURE_DEBUG_STAGES
-        idx = int(getattr(self, "_nurture_debug_idx", -1)) + 1
-        if idx >= len(stages):
-            idx = 0
-        self._nurture_debug_idx = idx
-        self.debug_nurture_set(stages[idx])
-
-    def debug_nurture_recover(self) -> None:
-        self._nurture_debug_idx = len(self._NURTURE_DEBUG_STAGES) - 1
-        self.debug_nurture_set(100)
 
     def _note_progress(self, **kwargs):
         for k, v in kwargs.items():
@@ -4264,15 +4129,6 @@ class RoachPet:
             self.cycle_ai_provider()
         elif cmd == "set_ai_key":
             self.set_ai_api_key_from_menu()
-        elif cmd == "nurture_debug_next":
-            self.debug_nurture_next()
-        elif cmd == "nurture_debug_recover":
-            self.debug_nurture_recover()
-        elif cmd.startswith("nurture_debug_"):
-            # nurture_debug_90 / nurture_debug_10 ...
-            tail = cmd[len("nurture_debug_") :]
-            if tail.isdigit():
-                self.debug_nurture_set(int(tail))
         elif cmd.startswith("key") or cmd.startswith("keyalt:"):
             self._handle_win_key_cmd(cmd)
 
