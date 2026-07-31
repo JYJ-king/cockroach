@@ -2890,6 +2890,8 @@ class RoachPet:
         self._worker_fired: set[str] = set()
         iv = float(self.settings.get("interaction_interval_sec") or 300)
         self._next_nurture = time.time() + 60.0
+        self._nurture_debug_freeze = False
+        self._nurture_debug_idx = -1
         self._next_proactive = time.time() + random.uniform(iv * 1.2, iv * 2.0)
         self._next_worker_idle = time.time() + 300
         lo_sc = float(self.settings.get("idle_showcase_min") or iv * 0.9)
@@ -3903,12 +3905,34 @@ class RoachPet:
             return random.choice(["好饿...", "小鱼干呢?", "肚子咕咕叫", "投喂救急"])
         return random.choice(["好累...", "对着表/网页耗尽了", "摸摸回血", "想趴会儿"])
 
-    def _recover_fatigue(self, amount: int = 10) -> None:
+    def _recover_fatigue(self, amount: int = 10, announce: bool = True) -> None:
+        # 快捷键连发会极快叠满；短冷却保证「每次互动」语义
+        now = time.time()
+        if now - float(getattr(self, "_last_fatigue_recover", 0.0) or 0.0) < 0.55:
+            return
+        before = int(self.brain.fatigue)
         self.brain.react_nurture_pet(amount)
+        after = int(self.brain.fatigue)
+        if after <= before:
+            return
+        self._last_fatigue_recover = now
         self._sync_nurture_to_progress()
         if self._nurture_vitality() >= 20:
             self._nurture_dying_said = False
             self._nurture_quit_armed = False
+        if announce:
+            self.say(f"疲劳+{after - before}→{after}", urgent=True, life=110)
+            self.fx("heart", 3)
+        if self._chrome is not None:
+            try:
+                self._chrome.rebuild_menus()
+            except Exception:
+                pass
+
+    def _key_pet_interact(self) -> None:
+        """快捷键对宠物互动：记用户操作并回疲劳。"""
+        self._note_user_act()
+        self._recover_fatigue(10)
 
     def _check_nurture(self) -> None:
         """每分钟：饥饿 -1；前台 Excel/网页时疲劳 -1；跨日疲劳回满；濒死/退出。"""
@@ -3917,6 +3941,23 @@ class RoachPet:
             return
         self._next_nurture = now + 60.0
         self._nurture_roll_day(persist=False)
+        # 调试冻结：不掉点、不因过低退出，方便逐档观察
+        if getattr(self, "_nurture_debug_freeze", False):
+            self._sync_nurture_to_progress()
+            v = self._nurture_vitality()
+            if self._chrome is not None:
+                try:
+                    self._chrome.rebuild_menus()
+                except Exception:
+                    pass
+            if v < 20 and (not self._nurture_dying_said or random.random() < 0.25):
+                self._nurture_dying_said = True
+                line = self._nurture_mood_line() or "濒死中..."
+                if not (self.bubbles.current or self.bubbles._q):
+                    self.say(f"[调试]{line}", urgent=True, life=120)
+                    self.fx("dust", 2)
+                self.roach.target_scale = min(self.roach.target_scale, 0.88)
+            return
         self.brain.hunger = max(0, self.brain.hunger - 1)
         if excel_or_browser_active():
             self.brain.fatigue = max(0, self.brain.fatigue - 1)
@@ -3953,6 +3994,122 @@ class RoachPet:
                 if line:
                     self.maybe_say(line, chance=1.0)
 
+    # 调试档：饥饿=疲劳=该值；1 用于测 <10 退出；100 为恢复满值
+    _NURTURE_DEBUG_STAGES = (90, 60, 50, 40, 30, 20, 10, 1, 100)
+
+    def _nurture_stage_desc(self, level: int) -> str:
+        """一句话说明该档预期互动效果（调试用）。"""
+        iv = float(self.settings.get("interaction_interval_sec") or 300)
+        if level >= 100:
+            return f"恢复满值 饥饿100 疲劳100 | 间隔×1 (~{int(iv)}s) | 正常互动"
+        if level < 10:
+            return f"活力{level} | <10 → 约1.5秒后退出（本档不冻结掉点）"
+        if level < 20:
+            return f"活力{level} | 停止主动互动+濒死缩身嘀咕（=10仍濒死；<10才退出）"
+        if level >= 60:
+            mul = 1.0
+            mood = "无饿累吐槽"
+        elif level >= 50:
+            mul = 1.5
+            mood = "吐槽很饿/很累"
+        elif level >= 40:
+            mul = 2.0
+            mood = "吐槽很饿/很累"
+        else:
+            mul = 3.0
+            mood = "吐槽很饿/很累"
+        return (
+            f"活力{level} | 间隔×{mul:g} (~{int(iv * mul)}s) | {mood} | 主动表演仍开"
+        )
+
+    def debug_nurture_set(self, level: int) -> None:
+        """把饥饿与疲劳设为同一档并立刻演示互动效果。"""
+        level = int(level)
+        now = time.time()
+        if level >= 100:
+            self.brain.hunger = 100
+            self.brain.fatigue = 100
+            self._nurture_debug_freeze = False
+            self._nurture_dying_said = False
+            self._nurture_quit_armed = False
+            self.roach.target_scale = 1.0
+            self._sync_nurture_to_progress()
+            save_progress(self.app_root, self.progress)
+            # 恢复后立刻安排一轮主动互动，便于对比
+            self._next_proactive = now + 2.0
+            self._next_showcase = now + 3.0
+            self._next_autonomy = now + 4.0
+            desc = self._nurture_stage_desc(100)
+            self.say(f"[调试恢复] {desc}", urgent=True, life=220)
+            self.fx("star", 6)
+            self.brain._set(State.HAPPY, 90)
+            if self._chrome is not None:
+                try:
+                    self._chrome.rebuild_menus()
+                except Exception:
+                    pass
+            return
+
+        level = max(0, min(99, level))
+        self.brain.hunger = level
+        self.brain.fatigue = level
+        self._nurture_dying_said = False
+        self._nurture_quit_armed = False
+        self._sync_nurture_to_progress()
+        save_progress(self.app_root, self.progress)
+
+        desc = self._nurture_stage_desc(level)
+        self.say(f"[调试] {desc}", urgent=True, life=240)
+        mood = self._nurture_mood_line()
+        if mood:
+            self.bubbles.push(f"→ {mood}", 160)
+
+        if level < 10:
+            # 测退出：不冻结，尽快走 _check_nurture 的 <10 退出路径
+            self._nurture_debug_freeze = False
+            self.roach.target_scale = 0.88
+            self.fx("dust", 5)
+            self.brain.go_hide()
+            self._next_proactive = now + 99999
+            self._next_showcase = now + 99999
+            self._next_autonomy = now + 99999
+            self._next_nurture = now + 1.5
+        elif level < 20:
+            self._nurture_debug_freeze = True
+            self.roach.target_scale = 0.88
+            self.fx("dust", 5)
+            self.brain.go_hide()
+            self._next_proactive = now + 99999
+            self._next_showcase = now + 99999
+            self._next_autonomy = now + 99999
+        else:
+            self._nurture_debug_freeze = True  # 冻结掉点，避免调试时滑档
+            self.roach.target_scale = 1.0
+            self.fx("star", 3)
+            self._next_proactive = now + 2.5
+            self._next_showcase = now + 5.0
+            self._next_autonomy = now + 8.0
+            if self.brain.state == State.HIDE:
+                self.brain._set(State.GREET, 80)
+        if self._chrome is not None:
+            try:
+                self._chrome.rebuild_menus()
+            except Exception:
+                pass
+
+    def debug_nurture_next(self) -> None:
+        """循环：90→60→50→40→30→20→10→恢复100。"""
+        stages = self._NURTURE_DEBUG_STAGES
+        idx = int(getattr(self, "_nurture_debug_idx", -1)) + 1
+        if idx >= len(stages):
+            idx = 0
+        self._nurture_debug_idx = idx
+        self.debug_nurture_set(stages[idx])
+
+    def debug_nurture_recover(self) -> None:
+        self._nurture_debug_idx = len(self._NURTURE_DEBUG_STAGES) - 1
+        self.debug_nurture_set(100)
+
     def _note_progress(self, **kwargs):
         for k, v in kwargs.items():
             if isinstance(v, int):
@@ -3976,6 +4133,16 @@ class RoachPet:
             self._handle_chrome_cmd(cmd)
 
     def _handle_chrome_cmd(self, cmd: str):
+        # 用户菜单/热键发起的玩耍：回疲劳（pet 在 do_pet_head 内处理，避免 +20）
+        _play = {
+            "call", "box", "sleep", "banter",
+            "cat_random", "cat_meow", "cat_sun", "cat_scratch", "cat_gift",
+            "cat_stare", "cat_knock", "cat_headbutt", "cat_chirp", "cat_ignore",
+            "cat_knead", "cat_groom",
+        }
+        if cmd in _play:
+            self._note_user_act()
+            self._recover_fatigue(10)
         if cmd == "quit":
             self.stop()
         elif cmd == "call":
@@ -4097,6 +4264,15 @@ class RoachPet:
             self.cycle_ai_provider()
         elif cmd == "set_ai_key":
             self.set_ai_api_key_from_menu()
+        elif cmd == "nurture_debug_next":
+            self.debug_nurture_next()
+        elif cmd == "nurture_debug_recover":
+            self.debug_nurture_recover()
+        elif cmd.startswith("nurture_debug_"):
+            # nurture_debug_90 / nurture_debug_10 ...
+            tail = cmd[len("nurture_debug_") :]
+            if tail.isdigit():
+                self.debug_nurture_set(int(tail))
         elif cmd.startswith("key") or cmd.startswith("keyalt:"):
             self._handle_win_key_cmd(cmd)
 
@@ -4115,23 +4291,28 @@ class RoachPet:
             return
         self._note_user_act()
         if cmd == "keyspace":
+            self._recover_fatigue(10)
             self.brain.react_jump()
             self.roach.target_scale = 1.2
             self.fx("star", 4)
             return
         if cmd == "keyleft":
+            self._recover_fatigue(10)
             self.brain.react_nudge(-3.5, 0)
             self.roach.set_facing(-1)
             return
         if cmd == "keyright":
+            self._recover_fatigue(10)
             self.brain.react_nudge(3.5, 0)
             self.roach.set_facing(1)
             return
         if cmd == "keydown":
+            self._recover_fatigue(10)
             self.brain.react_nudge(0, 3.5)
             self.roach.set_facing(0, 1)
             return
         if cmd == "keyup":
+            self._recover_fatigue(10)
             self.brain.react_nudge(0, -3.5)
             self.roach.set_facing(0, -1)
             self.roach.target_scale = 1.1
@@ -4240,7 +4421,7 @@ class RoachPet:
         self._note_progress(pet_count=1)
         streak = self.brain.pet_streak
         if streak >= 3 and streak % 3 == 0:
-            self.do_knead()
+            self.do_knead(from_pet=True)
             return
         self.maybe_say(random.choice(Bubble.CLICK_PHRASES), chance=0.45)
 
@@ -5875,7 +6056,7 @@ class RoachPet:
         self.fx("dust", 8)
         self.maybe_say(random.choice(Bubble.POUNCE_PHRASES), chance=0.5)
 
-    def do_knead(self):
+    def do_knead(self, from_pet: bool = False):
         """踩奶。"""
         self.brain._set(State.HAPPY, 110)
         self.roach.belly = False
@@ -6378,6 +6559,7 @@ class RoachPet:
         fn = cat_map.get(chars)
         if fn:
             self._note_user_act()
+            self._recover_fatigue(10)
             fn()
             return True
         return False
@@ -6416,6 +6598,8 @@ class RoachPet:
         self._note_user_act()
         # 极简：只保留最常用几个键
         if self.settings.get("simple_mode", True):
+            if chars in {"n", "k"}:
+                self._recover_fatigue(10)
             simple_map = {
                 "n": self.do_box,
                 "k": self.do_call,
@@ -6430,24 +6614,33 @@ class RoachPet:
                 fn()
             return
         if chars == "p":
-            self.brain.react_poke()
-            self.fx("dust", 5)
-            self.maybe_say(random.choice(Bubble.POKE_PHRASES), chance=0.35)
+            # 完整模式：p 已改财务脏话；poke 走别的。这里不回疲劳
+            self.say_finance_swear()
             return
         if chars == "r":
+            self._recover_fatigue(10)
             self.brain.react_dblclick()
             self.fx("star", 4)
             self.maybe_say(random.choice(["冲!", "开跑!", "喵闪!"]), chance=0.25)
             return
         if chars == "n":
+            self._recover_fatigue(10)
             self.do_box()
             return
         if chars == ",":
+            self._recover_fatigue(10)
             self.do_banter()
             return
         if chars == ".":
             self.toggle_buddy()
             return
+        # 会带动画/互动的玩耍键（含财务小品 1–9）；纯查状态/投喂不加
+        play_keys = {
+            "a", "m", "c", "b", "u", "l", "q", "e", "z", "k", "v", "o", "x", "i",
+            "y", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
+        }
+        if chars in play_keys:
+            self._recover_fatigue(10)
         mapping = {
             "d": self.say_date,
             "t": self.do_story,
@@ -6474,7 +6667,6 @@ class RoachPet:
             "9": self.do_tax_check,
             "0": self.do_payroll_day,
             ";": self.say_finance_tip,
-            "p": self.say_finance_swear,
             "/": self.say_sys_overview,
             "[": self.say_sys_cpu,
             "]": self.say_sys_mem,
@@ -6698,6 +6890,7 @@ class RoachPet:
 
         # 睡觉时单击叫醒，稍后仍会回窝趴着
         if self.brain.state == State.SLEEP:
+            self._recover_fatigue(10)
             self.brain._set(State.HAPPY, 50)
             self.roach.target_scale = 1.05
             self.fx("star", 3)
@@ -6714,7 +6907,9 @@ class RoachPet:
         if self._rest_active:
             self._rest_active = False
             self.bubbles.clear()
-            self.say("好,继续撸代码", urgent=True, life=90)
+            self._recover_fatigue(10, announce=False)
+            f = int(self.brain.fatigue)
+            self.say(f"好,继续撸代码 疲劳{f}", urgent=True, life=100)
             self.fx("heart", 3)
             self.dragging = True
             self.drag_start = (event.locationInWindow().x, event.locationInWindow().y)
@@ -6726,6 +6921,7 @@ class RoachPet:
 
         # 翻肚时点一下翻回来
         if self.brain.state == State.BELLY or self.roach.belly:
+            self._recover_fatigue(10)
             self.roach.belly = False
             self.roach.spin = 0
             self.brain._set(State.HAPPY, 50)
@@ -6743,8 +6939,9 @@ class RoachPet:
             self.click_count = 1
         self.click_time = now
 
-        # 小猫正面：上半摸头，下半逗弄/吓跑
+        # 小猫正面：上半摸头，下半逗弄/吓跑；任意点击都回一点疲劳
         head_side = my < ROACH_Y + self.roach.sh * 0.48
+        self._recover_fatigue(10)
 
         if self.click_count >= 3:
             self.click_count = 0
@@ -6773,8 +6970,6 @@ class RoachPet:
             self.fx("star", 5)
             self.maybe_say(random.choice(["冲!", "跑酷!", "喵闪!", "起飞!"]), chance=0.3)
         elif head_side:
-            self._note_user_act()
-            self._recover_fatigue(10)
             self.brain.react_click()
             self.roach.target_scale = 1.08
             self.roach.force_anim("waving", 2.0)
@@ -6782,7 +6977,7 @@ class RoachPet:
             self._note_progress(pet_count=1)
             streak = self.brain.pet_streak
             if streak >= 3 and streak % 3 == 0:
-                self.do_knead()
+                self.do_knead(from_pet=True)
                 return
             if streak >= 5 and streak % 5 == 0:
                 self.say(random.choice(["好感爆棚!", "还要摸!", f"连摸{streak}下~"]), urgent=True)
@@ -6965,23 +7160,28 @@ class RoachPet:
 
         # 方向键 keyCode: 左123 右124 下125 上126
         if code == 123:
+            self._key_pet_interact()
             self.brain.react_nudge(-3.5, 0)
             self.roach.set_facing(-1)
             return False
         if code == 124:
+            self._key_pet_interact()
             self.brain.react_nudge(3.5, 0)
             self.roach.set_facing(1)
             return False
         if code == 125:
+            self._key_pet_interact()
             self.brain.react_nudge(0, 3.5)
             self.roach.set_facing(0, 1)
             return False
         if code == 126:
+            self._key_pet_interact()
             self.brain.react_nudge(0, -3.5)
             self.roach.set_facing(0, -1)
             self.roach.target_scale = 1.1
             return False
         if code == 49:  # Space
+            self._key_pet_interact()
             self.brain.react_jump()
             self.roach.target_scale = 1.2
             self.fx("star", 4)
@@ -7438,23 +7638,28 @@ class RoachPet:
             return True
         # 方向键 / 空格
         if ev.key == pygame.K_LEFT:
+            self._key_pet_interact()
             self.brain.react_nudge(-3.5, 0)
             self.roach.set_facing(-1)
             return False
         if ev.key == pygame.K_RIGHT:
+            self._key_pet_interact()
             self.brain.react_nudge(3.5, 0)
             self.roach.set_facing(1)
             return False
         if ev.key == pygame.K_DOWN:
+            self._key_pet_interact()
             self.brain.react_nudge(0, 3.5)
             self.roach.set_facing(0, 1)
             return False
         if ev.key == pygame.K_UP:
+            self._key_pet_interact()
             self.brain.react_nudge(0, -3.5)
             self.roach.set_facing(0, -1)
             self.roach.target_scale = 1.1
             return False
         if ev.key == pygame.K_SPACE:
+            self._key_pet_interact()
             self.brain.react_jump()
             self.roach.target_scale = 1.2
             self.fx("star", 4)
