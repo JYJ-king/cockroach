@@ -774,11 +774,13 @@ class DesktopChrome:
             root.withdraw()
             root.attributes("-topmost", True)
             menu = tk.Menu(root, tearoff=0)
+            chosen: list[str] = []
 
             def add_cmd(parent, title: str, cmd: str) -> None:
+                # 先记下选项，菜单销毁后再 _emit，避免 destroy 打断回调
                 parent.add_command(
                     label=self._menu_label(title, cmd),
-                    command=lambda c=cmd: self._emit(c),
+                    command=lambda c=cmd: chosen.append(c),
                 )
 
             def add_cascade(parent, title: str, rows: tuple) -> None:
@@ -824,10 +826,19 @@ class DesktopChrome:
                 add_cmd(menu, "退出", "quit")
 
             try:
+                root.update_idletasks()
                 menu.tk_popup(int(screen_x), int(screen_y))
             finally:
-                menu.grab_release()
-                root.destroy()
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+            for cmd in chosen:
+                self._emit(cmd)
             return True
         except Exception as exc:
             print(f"⚠️ Win 弹出菜单失败: {exc}")

@@ -1361,6 +1361,24 @@ _DESKTOP_SIZE_CACHE: tuple[float, tuple[int, int]] = (0.0, (1280, 800))
 _LOAD_SAMPLE_CACHE: tuple[float, dict | None] = (0.0, None)
 
 
+def get_desktop_origin() -> tuple[int, int]:
+    """虚拟桌面左上角（多屏时可能为负）；用于 Win SetWindowPos。"""
+    if not IS_WIN:
+        return (0, 0)
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        SM_XVIRTUALSCREEN = 76
+        SM_YVIRTUALSCREEN = 77
+        return (
+            int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN)),
+            int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN)),
+        )
+    except Exception:
+        return (0, 0)
+
+
 def get_desktop_size() -> tuple[int, int]:
     """屏幕尺寸：缓存约 1 秒，避免每帧打 AppKit/WinAPI。"""
     global _DESKTOP_SIZE_CACHE
@@ -3384,6 +3402,7 @@ class RoachPet:
             return
         import ctypes
         old = (int(self.x), int(self.y))
+        self._win_prepare_sdl_window_pos(old[0], old[1])
         self.screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
         self.hwnd = pygame.display.get_wm_info()["window"]
         user32 = ctypes.windll.user32
@@ -3402,6 +3421,14 @@ class RoachPet:
         self._win_click_through = True  # 强制刷新样式
         self._win_set_click_through(False)
         self._win_apply_pos()
+
+    def _win_prepare_sdl_window_pos(self, x: int | None = None, y: int | None = None) -> None:
+        """在 set_mode 前锁定 SDL 窗位，避免默认居中后与逻辑坐标脱节。"""
+        px = int(self.x if x is None else x)
+        py = int(self.y if y is None else y)
+        ox, oy = get_desktop_origin()
+        os.environ["SDL_VIDEO_WINDOW_POS"] = f"{px + ox},{py + oy}"
+        os.environ.pop("SDL_VIDEO_CENTERED", None)
 
     def do_banter(self):
         """手动触发一次主宠 vs 会计猫对喷（高压日自动改鼓励语气）。"""
@@ -3735,6 +3762,7 @@ class RoachPet:
             del os.environ["SDL_VIDEODRIVER"]
         if not pygame.display.get_init():
             pygame.display.init()
+        self._win_prepare_sdl_window_pos()
         self.screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.NOFRAME)
         pygame.display.set_caption(CAPTION)
         self.hwnd = pygame.display.get_wm_info()["window"]
@@ -3757,24 +3785,81 @@ class RoachPet:
         self._win_apply_pos()
 
     def _win_apply_pos(self):
+        """把逻辑坐标写到 HWND；对抗 Win+D / SDL 回写居中。
+        注意：不可每帧强行 HWND_TOPMOST，否则会抢走托盘/弹出菜单焦点，导致菜单点了没反应。
+        """
         if not self.hwnd:
             return
         if getattr(self, "_stealth", False):
             return
         import ctypes
+        from ctypes import wintypes
+
         user32 = ctypes.windll.user32
         HWND_TOPMOST = -1
+        SW_RESTORE = 9
         SW_SHOWNOACTIVATE = 4
         SWP_NOSIZE = 0x0001
+        SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
         SWP_SHOWWINDOW = 0x0040
-        # 「显示桌面」/ Win+D 会把置顶窗一并最小化；每帧拉回，保持始终在桌面上
-        if user32.IsIconic(self.hwnd):
-            user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
-        user32.SetWindowPos(
-            self.hwnd, HWND_TOPMOST, int(self.x), int(self.y), 0, 0,
-            SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        )
+
+        ox, oy = get_desktop_origin()
+        x = int(self.x) + int(ox)
+        y = int(self.y) + int(oy)
+        now = time.time()
+        last = getattr(self, "_win_last_applied", None)
+        moved = last != (x, y)
+        try:
+            iconic = bool(user32.IsIconic(self.hwnd))
+            visible = bool(user32.IsWindowVisible(self.hwnd))
+        except Exception:
+            iconic, visible = False, True
+        need_restore = iconic or (not visible)
+        last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
+        # 置顶只需低频补强；位移时只改坐标不抢 Z 序，避免打掉菜单
+        need_topmost = need_restore or (now - last_top >= 3.0)
+
+        if not moved and not need_restore and not need_topmost:
+            return
+
+        # 同步 SDL 内部窗位（位移时），减少 display.update 打回旧坐标
+        if moved:
+            try:
+                from pygame._sdl2.video import Window as _SdlWindow
+
+                _SdlWindow.from_display_module().position = (x, y)
+            except Exception:
+                pass
+
+        if need_restore:
+            if iconic:
+                user32.ShowWindow(self.hwnd, SW_RESTORE)
+                user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+            else:
+                user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+
+        if need_topmost or need_restore:
+            flags = SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+            user32.SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, 0, 0, flags)
+            self._win_last_topmost_at = now
+        elif moved:
+            user32.SetWindowPos(
+                self.hwnd, 0, x, y, 0, 0,
+                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+
+        self._win_last_applied = (x, y)
+
+        # 位移后若仍偏离，再同步一次（仍尽量不改 Z 序）
+        if moved or need_restore:
+            rect = wintypes.RECT()
+            if user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
+                if abs(int(rect.left) - x) > 2 or abs(int(rect.top) - y) > 2:
+                    user32.SetWindowPos(
+                        self.hwnd, 0, x, y, 0, 0,
+                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+                    )
 
     def _win_focus_for_input(self):
         """点击小猫后抢焦点，否则 Windows 下快捷键全部无效。"""
@@ -3946,8 +4031,12 @@ class RoachPet:
 
         v = self._nurture_vitality()
         if self._chrome is not None:
+            # 仅数值变化时刷新菜单文案，避免每分钟重建托盘打断正在点的菜单
             try:
-                self._chrome.rebuild_menus()
+                key = (int(self.brain.hunger), int(self.brain.fatigue))
+                if key != getattr(self, "_nurture_menu_key", None):
+                    self._nurture_menu_key = key
+                    self._chrome.rebuild_menus()
             except Exception:
                 pass
         if v < 10:
@@ -6581,7 +6670,9 @@ class RoachPet:
                 _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
             pt = POINT()
             ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-            return float(pt.x), float(pt.y)
+            # 与 self.x/y 一致：相对虚拟桌面左上（get_desktop_origin）
+            ox, oy = get_desktop_origin()
+            return float(pt.x) - float(ox), float(pt.y) - float(oy)
         loc = NSEvent.mouseLocation()
         return loc.x, self._sh() - loc.y
 
@@ -7187,6 +7278,8 @@ class RoachPet:
             self.screen.fill(_WIN_COLORKEY)
             self.screen.blit(self.canvas, (0, 0))
             pygame.display.update()
+            # 必须在 update 之后再写 HWND：SDL 往往会把窗位打回旧/居中坐标
+            self._win_apply_pos()
 
     def _refresh_view(self):
         if IS_MAC and self.view is not None:
