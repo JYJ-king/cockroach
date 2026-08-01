@@ -3404,15 +3404,20 @@ class RoachPet:
         old = (int(self.x), int(self.y))
         self._win_prepare_sdl_window_pos(old[0], old[1])
         self.screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
-        self.hwnd = pygame.display.get_wm_info()["window"]
+        info = pygame.display.get_wm_info() or {}
+        self.hwnd = info.get("window")
+        if not self.hwnd:
+            return
         user32 = ctypes.windll.user32
         GWL_EXSTYLE = -20
         WS_EX_LAYERED = 0x00080000
         WS_EX_TOOLWINDOW = 0x00000080
         WS_EX_TOPMOST = 0x00000008
         LWA_COLORKEY = 0x00000001
-        style = user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
-        user32.SetWindowLongW(
+        get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        set_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+        style = int(get_long(self.hwnd, GWL_EXSTYLE))
+        set_long(
             self.hwnd, GWL_EXSTYLE,
             style | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         )
@@ -3420,15 +3425,18 @@ class RoachPet:
         self.x, self.y = float(old[0]), float(old[1])
         self._win_click_through = True  # 强制刷新样式
         self._win_set_click_through(False)
-        self._win_apply_pos()
+        self._win_apply_pos(force=True)
 
     def _win_prepare_sdl_window_pos(self, x: int | None = None, y: int | None = None) -> None:
         """在 set_mode 前锁定 SDL 窗位，避免默认居中后与逻辑坐标脱节。"""
-        px = int(self.x if x is None else x)
-        py = int(self.y if y is None else y)
-        ox, oy = get_desktop_origin()
-        os.environ["SDL_VIDEO_WINDOW_POS"] = f"{px + ox},{py + oy}"
-        os.environ.pop("SDL_VIDEO_CENTERED", None)
+        try:
+            px = int(self.x if x is None else x)
+            py = int(self.y if y is None else y)
+            ox, oy = get_desktop_origin()
+            os.environ["SDL_VIDEO_WINDOW_POS"] = f"{px + ox},{py + oy}"
+            os.environ.pop("SDL_VIDEO_CENTERED", None)
+        except Exception:
+            os.environ.pop("SDL_VIDEO_WINDOW_POS", None)
 
     def do_banter(self):
         """手动触发一次主宠 vs 会计猫对喷（高压日自动改鼓励语气）。"""
@@ -3765,7 +3773,10 @@ class RoachPet:
         self._win_prepare_sdl_window_pos()
         self.screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.NOFRAME)
         pygame.display.set_caption(CAPTION)
-        self.hwnd = pygame.display.get_wm_info()["window"]
+        info = pygame.display.get_wm_info() or {}
+        self.hwnd = info.get("window")
+        if not self.hwnd:
+            raise RuntimeError("Windows 无法获取窗口句柄（pygame display）")
 
         user32 = ctypes.windll.user32
         GWL_EXSTYLE = -20
@@ -3773,8 +3784,11 @@ class RoachPet:
         WS_EX_TOOLWINDOW = 0x00000080
         WS_EX_TOPMOST = 0x00000008
         LWA_COLORKEY = 0x00000001
-        style = user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
-        user32.SetWindowLongW(
+        # 64 位优先 LongPtr，避免截断样式导致后续闪退
+        get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        set_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+        style = int(get_long(self.hwnd, GWL_EXSTYLE))
+        set_long(
             self.hwnd, GWL_EXSTYLE,
             style | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         )
@@ -3782,84 +3796,77 @@ class RoachPet:
         # 清掉可能残留的 TRANSPARENT，并强制刷新样式
         self._win_click_through = True  # 强制走一遍 set(False)
         self._win_set_click_through(False)
-        self._win_apply_pos()
+        self._win_apply_pos(force=True)
 
-    def _win_apply_pos(self):
+    def _win_apply_pos(self, force: bool = False):
         """把逻辑坐标写到 HWND；对抗 Win+D / SDL 回写居中。
         注意：不可每帧强行 HWND_TOPMOST，否则会抢走托盘/弹出菜单焦点，导致菜单点了没反应。
+        不使用 pygame._sdl2（打包 exe 上易原生崩溃）。
         """
         if not self.hwnd:
             return
         if getattr(self, "_stealth", False):
             return
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-        HWND_TOPMOST = -1
-        SW_RESTORE = 9
-        SW_SHOWNOACTIVATE = 4
-        SWP_NOSIZE = 0x0001
-        SWP_NOZORDER = 0x0004
-        SWP_NOACTIVATE = 0x0010
-        SWP_SHOWWINDOW = 0x0040
-
-        ox, oy = get_desktop_origin()
-        x = int(self.x) + int(ox)
-        y = int(self.y) + int(oy)
-        now = time.time()
-        last = getattr(self, "_win_last_applied", None)
-        moved = last != (x, y)
         try:
-            iconic = bool(user32.IsIconic(self.hwnd))
-            visible = bool(user32.IsWindowVisible(self.hwnd))
-        except Exception:
-            iconic, visible = False, True
-        need_restore = iconic or (not visible)
-        last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
-        # 置顶只需低频补强；位移时只改坐标不抢 Z 序，避免打掉菜单
-        need_topmost = need_restore or (now - last_top >= 3.0)
+            import ctypes
+            from ctypes import wintypes
 
-        if not moved and not need_restore and not need_topmost:
-            return
+            user32 = ctypes.windll.user32
+            HWND_TOPMOST = -1
+            SW_RESTORE = 9
+            SW_SHOWNOACTIVATE = 4
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_SHOWWINDOW = 0x0040
 
-        # 同步 SDL 内部窗位（位移时），减少 display.update 打回旧坐标
-        if moved:
+            ox, oy = get_desktop_origin()
+            x = int(self.x) + int(ox)
+            y = int(self.y) + int(oy)
+            now = time.time()
+            last = getattr(self, "_win_last_applied", None)
+            moved = force or last != (x, y)
             try:
-                from pygame._sdl2.video import Window as _SdlWindow
-
-                _SdlWindow.from_display_module().position = (x, y)
+                iconic = bool(user32.IsIconic(self.hwnd))
             except Exception:
-                pass
+                iconic = False
+            # 刚创建的 TOOLWINDOW/分层窗 IsWindowVisible 可能短暂为假，勿据此狂 ShowWindow
+            need_restore = iconic
+            last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
+            need_topmost = force or need_restore or (now - last_top >= 3.0)
 
-        if need_restore:
-            if iconic:
+            if not moved and not need_restore and not need_topmost:
+                return
+
+            if need_restore:
                 user32.ShowWindow(self.hwnd, SW_RESTORE)
                 user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
-            else:
-                user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
 
-        if need_topmost or need_restore:
-            flags = SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
-            user32.SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, 0, 0, flags)
-            self._win_last_topmost_at = now
-        elif moved:
-            user32.SetWindowPos(
-                self.hwnd, 0, x, y, 0, 0,
-                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-            )
+            if need_topmost or need_restore:
+                flags = SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+                user32.SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, 0, 0, flags)
+                self._win_last_topmost_at = now
+            elif moved:
+                user32.SetWindowPos(
+                    self.hwnd, 0, x, y, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                )
 
-        self._win_last_applied = (x, y)
+            self._win_last_applied = (x, y)
 
-        # 位移后若仍偏离，再同步一次（仍尽量不改 Z 序）
-        if moved or need_restore:
-            rect = wintypes.RECT()
-            if user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
-                if abs(int(rect.left) - x) > 2 or abs(int(rect.top) - y) > 2:
-                    user32.SetWindowPos(
-                        self.hwnd, 0, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
-                    )
+            if moved or need_restore:
+                rect = wintypes.RECT()
+                if user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
+                    if abs(int(rect.left) - x) > 2 or abs(int(rect.top) - y) > 2:
+                        user32.SetWindowPos(
+                            self.hwnd, 0, x, y, 0, 0,
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+                        )
+        except Exception as exc:
+            # 窗位失败不应拖垮整宠
+            if not getattr(self, "_win_pos_err_said", False):
+                self._win_pos_err_said = True
+                print(f"⚠️ Win 窗位更新失败: {exc}")
 
     def _win_focus_for_input(self):
         """点击小猫后抢焦点，否则 Windows 下快捷键全部无效。"""
@@ -3919,6 +3926,11 @@ class RoachPet:
             f = 100
         self.brain.hunger = max(0, min(100, h))
         self.brain.fatigue = max(0, min(100, f))
+        # 调试残留过低会导致启动后很快「撑不住退出」，读档时抬到安全线
+        if self.brain.hunger < 10:
+            self.brain.hunger = 30
+        if self.brain.fatigue < 10:
+            self.brain.fatigue = 30
         self._nurture_roll_day(persist=False)
 
     def _sync_nurture_to_progress(self) -> None:
@@ -6725,27 +6737,34 @@ class RoachPet:
     def _win_set_click_through(self, enabled: bool):
         if enabled == self._win_click_through:
             return
-        import ctypes
-        user32 = ctypes.windll.user32
-        GWL_EXSTYLE = -20
-        WS_EX_TRANSPARENT = 0x00000020
-        SWP_NOSIZE = 0x0001
-        SWP_NOMOVE = 0x0002
-        SWP_NOZORDER = 0x0004
-        SWP_NOACTIVATE = 0x0010
-        SWP_FRAMECHANGED = 0x0020
-        style = user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
-        if enabled:
-            style |= WS_EX_TRANSPARENT
-        else:
-            style &= ~WS_EX_TRANSPARENT
-        user32.SetWindowLongW(self.hwnd, GWL_EXSTYLE, style)
-        # 必须 FRAMECHANGED，否则样式切换不生效（互动全废的常见原因）
-        user32.SetWindowPos(
-            self.hwnd, 0, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        )
-        self._win_click_through = enabled
+        if not self.hwnd:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            GWL_EXSTYLE = -20
+            WS_EX_TRANSPARENT = 0x00000020
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+            get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+            set_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+            style = int(get_long(self.hwnd, GWL_EXSTYLE))
+            if enabled:
+                style |= WS_EX_TRANSPARENT
+            else:
+                style &= ~WS_EX_TRANSPARENT
+            set_long(self.hwnd, GWL_EXSTYLE, style)
+            # 必须 FRAMECHANGED，否则样式切换不生效（互动全废的常见原因）
+            user32.SetWindowPos(
+                self.hwnd, 0, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+            self._win_click_through = enabled
+        except Exception as exc:
+            print(f"⚠️ Win 点击穿透切换失败: {exc}")
 
     # ── 鼠标 ──────────────────────────────────────────────
 
@@ -7668,6 +7687,18 @@ if __name__ == "__main__":
         create_pet().run()
     except Exception as exc:
         print(f"❌ 启动失败: {exc}")
+        # windowed exe 无控制台：把堆栈写到工作目录，方便排查闪退
+        try:
+            import traceback
+
+            log_path = os.path.join(app_dir(), "crash.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(f"time={datetime.now().isoformat()}\n")
+                f.write(f"error={exc!r}\n\n")
+                traceback.print_exc(file=f)
+            print(f"   已写入 {log_path}")
+        except Exception:
+            pass
         raise
     finally:
         pygame.quit()
