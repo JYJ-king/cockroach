@@ -2991,6 +2991,10 @@ class RoachPet:
         # Windows：快捷键不依赖窗口焦点（鼠标在猫上 / 刚点过即可）
         self._pointer_over_pet = False
         self._win_keys_until = 0.0
+        self._win_menu_quiet = False
+        self._win_ui_quiet_until = 0.0
+        self._win_yielded_topmost = False
+        self._win_menus_dirty = False
         self._mac_last_origin: tuple[int, int] | None = None
 
         if IS_MAC:
@@ -3007,6 +3011,7 @@ class RoachPet:
             self._cmd_q.put,
             self.settings,
             win_keys_active=self._win_keys_active if IS_WIN else None,
+            win_menu_gate=self._win_set_menu_quiet if IS_WIN else None,
             progress=self.progress,
         )
         self._chrome.start()
@@ -3650,11 +3655,7 @@ class RoachPet:
             self.say(tip, urgent=True, life=170)
         else:
             self.say(f"记下了·今天先不应援·已记{n}次", urgent=True, life=150)
-        if self._chrome is not None:
-            try:
-                self._chrome.rebuild_menus()
-            except Exception:
-                pass
+        self._chrome_rebuild_menus_safe()
 
     def _watch_support_session(self) -> None:
         """应援窗口边沿：真正月结结束 → 挂起收工仪式，等回家/睡觉触发。"""
@@ -3799,9 +3800,11 @@ class RoachPet:
         self._win_apply_pos(force=True)
 
     def _win_apply_pos(self, force: bool = False):
-        """把逻辑坐标写到 HWND；对抗 Win+D / SDL 回写居中。
-        注意：不可每帧强行 HWND_TOPMOST，否则会抢走托盘/弹出菜单焦点，导致菜单点了没反应。
-        不使用 pygame._sdl2（打包 exe 上易原生崩溃）。
+        """把逻辑坐标写到 HWND，并尽量保持置顶。
+        - 位移：HWND_TOPMOST + 坐标（NOACTIVATE）
+        - 静止：约每 1s 补一次 Z 序（避免每帧抢菜单）
+        - 菜单/系统弹出层打开时：让出置顶，保证可点
+        - Win+D 最小化：RESTORE 后再置顶
         """
         if not self.hwnd:
             return
@@ -3813,10 +3816,13 @@ class RoachPet:
 
             user32 = ctypes.windll.user32
             HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
             SW_RESTORE = 9
             SW_SHOWNOACTIVATE = 4
+            GWL_EXSTYLE = -20
+            WS_EX_TOPMOST = 0x00000008
             SWP_NOSIZE = 0x0001
-            SWP_NOZORDER = 0x0004
+            SWP_NOMOVE = 0x0002
             SWP_NOACTIVATE = 0x0010
             SWP_SHOWWINDOW = 0x0040
 
@@ -3826,47 +3832,166 @@ class RoachPet:
             now = time.time()
             last = getattr(self, "_win_last_applied", None)
             moved = force or last != (x, y)
+            yield_ui = self._win_should_yield_topmost()
+
             try:
                 iconic = bool(user32.IsIconic(self.hwnd))
             except Exception:
                 iconic = False
-            # 刚创建的 TOOLWINDOW/分层窗 IsWindowVisible 可能短暂为假，勿据此狂 ShowWindow
-            need_restore = iconic
-            last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
-            need_topmost = force or need_restore or (now - last_top >= 3.0)
 
-            if not moved and not need_restore and not need_topmost:
-                return
+            get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+            set_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
 
-            if need_restore:
+            def _set_topmost_style(on: bool) -> None:
+                try:
+                    style = int(get_long(self.hwnd, GWL_EXSTYLE))
+                    if on and not (style & WS_EX_TOPMOST):
+                        set_long(self.hwnd, GWL_EXSTYLE, style | WS_EX_TOPMOST)
+                    elif (not on) and (style & WS_EX_TOPMOST):
+                        set_long(self.hwnd, GWL_EXSTYLE, style & ~WS_EX_TOPMOST)
+                except Exception:
+                    pass
+
+            if iconic:
+                _set_topmost_style(True)
                 user32.ShowWindow(self.hwnd, SW_RESTORE)
                 user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
-
-            if need_topmost or need_restore:
-                flags = SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
-                user32.SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, 0, 0, flags)
-                self._win_last_topmost_at = now
-            elif moved:
                 user32.SetWindowPos(
-                    self.hwnd, 0, x, y, 0, 0,
-                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                    self.hwnd, HWND_TOPMOST, x, y, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
+                self._win_last_topmost_at = now
+            elif yield_ui:
+                # 托盘/右键菜单打开：让出置顶一次即可，勿每帧 SetWindowPos 抢焦点
+                if not getattr(self, "_win_yielded_topmost", False):
+                    _set_topmost_style(False)
+                    user32.SetWindowPos(
+                        self.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    )
+                    self._win_yielded_topmost = True
+                if moved or force:
+                    user32.SetWindowPos(
+                        self.hwnd, HWND_NOTOPMOST, x, y, 0, 0,
+                        SWP_NOSIZE | SWP_NOACTIVATE,
+                    )
+                    self._win_last_applied = (x, y)
+                return
+            else:
+                self._win_yielded_topmost = False
+                if moved:
+                    _set_topmost_style(True)
+                    user32.SetWindowPos(
+                        self.hwnd, HWND_TOPMOST, x, y, 0, 0,
+                        SWP_NOSIZE | SWP_NOACTIVATE,
+                    )
+                    self._win_last_topmost_at = now
+                else:
+                    # 静止：低频补 Z 序，兼顾「不被盖住」与「不抢菜单」
+                    last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
+                    if force or (now - last_top >= 1.0):
+                        _set_topmost_style(True)
+                        user32.SetWindowPos(
+                            self.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        )
+                        self._win_last_topmost_at = now
 
             self._win_last_applied = (x, y)
 
-            if moved or need_restore:
+            if moved or iconic:
                 rect = wintypes.RECT()
                 if user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
                     if abs(int(rect.left) - x) > 2 or abs(int(rect.top) - y) > 2:
                         user32.SetWindowPos(
-                            self.hwnd, 0, x, y, 0, 0,
-                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+                            self.hwnd, HWND_TOPMOST, x, y, 0, 0,
+                            SWP_NOSIZE | SWP_NOACTIVATE,
                         )
         except Exception as exc:
-            # 窗位失败不应拖垮整宠
             if not getattr(self, "_win_pos_err_said", False):
                 self._win_pos_err_said = True
                 print(f"⚠️ Win 窗位更新失败: {exc}")
+
+    def _win_should_yield_topmost(self) -> bool:
+        """菜单/系统弹出层打开时不要抢 Z 序。"""
+        if getattr(self, "_win_menu_quiet", False):
+            return True
+        if time.time() < float(getattr(self, "_win_ui_quiet_until", 0.0) or 0.0):
+            return True
+        now = time.time()
+        cache_until = float(getattr(self, "_win_yield_cache_until", 0.0) or 0.0)
+        if now < cache_until:
+            return bool(getattr(self, "_win_yield_cache", False))
+        yield_ui = False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            # 任意可见弹出菜单（托盘/右键），不依赖谁是前台
+            found = ctypes.c_int(0)
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def _enum(hwnd, _lp):
+                try:
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                    buf = ctypes.create_unicode_buffer(64)
+                    user32.GetClassNameW(hwnd, buf, 64)
+                    if buf.value == "#32768":
+                        found.value = 1
+                        return False
+                except Exception:
+                    pass
+                return True
+
+            user32.EnumWindows(_enum, 0)
+            if found.value:
+                yield_ui = True
+            else:
+                fg = user32.GetForegroundWindow()
+                if fg:
+                    buf = ctypes.create_unicode_buffer(256)
+                    user32.GetClassNameW(fg, buf, 256)
+                    cls = buf.value or ""
+                    if cls == "#32768":
+                        yield_ui = True
+                    else:
+                        pid = wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+                        my_pid = int(ctypes.windll.kernel32.GetCurrentProcessId())
+                        if int(pid.value) == my_pid and cls.startswith("Tk"):
+                            yield_ui = True
+        except Exception:
+            yield_ui = False
+        self._win_yield_cache = yield_ui
+        # 菜单打开时更勤检测，关闭后可稍缓
+        self._win_yield_cache_until = now + (0.05 if yield_ui else 0.12)
+        return yield_ui
+
+    def _win_set_menu_quiet(self, on: bool) -> None:
+        """Chrome 弹出菜单时调用：让出置顶，结束后恢复。"""
+        self._win_menu_quiet = bool(on)
+        if on:
+            self._win_ui_quiet_until = time.time() + 30.0
+            self._win_apply_pos(force=True)
+        else:
+            self._win_menu_quiet = False
+            self._win_ui_quiet_until = time.time() + 0.8
+            self._win_apply_pos(force=True)
+
+    def _chrome_rebuild_menus_safe(self) -> None:
+        """菜单打开时不重建托盘，避免打断用户点击。"""
+        if self._chrome is None:
+            return
+        if IS_WIN and self._win_should_yield_topmost():
+            self._win_menus_dirty = True
+            return
+        try:
+            self._chrome.rebuild_menus()
+            self._win_menus_dirty = False
+        except Exception:
+            pass
 
     def _win_focus_for_input(self):
         """点击小猫后抢焦点，否则 Windows 下快捷键全部无效。"""
@@ -3895,6 +4020,27 @@ class RoachPet:
                 user32.SetForegroundWindow(hwnd)
             except Exception:
                 pass
+
+    def _win_cursor_over_window(self) -> bool:
+        """光标是否在宠物窗口矩形内（含透明区），供快捷键判定。"""
+        if not self.hwnd:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+            user32 = ctypes.windll.user32
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
+                return False
+            return bool(user32.PtInRect(ctypes.byref(rect), pt))
+        except Exception:
+            return False
 
     def stop(self):
         self._persist()
@@ -4018,11 +4164,7 @@ class RoachPet:
         if announce:
             self.say(f"疲劳+{after - before}→{after}", urgent=True, life=110)
             self.fx("heart", 3)
-        if self._chrome is not None:
-            try:
-                self._chrome.rebuild_menus()
-            except Exception:
-                pass
+        self._chrome_rebuild_menus_safe()
 
     def _key_pet_interact(self) -> None:
         """快捷键对宠物互动：记用户操作并回疲劳。"""
@@ -4042,15 +4184,14 @@ class RoachPet:
         self._sync_nurture_to_progress()
 
         v = self._nurture_vitality()
-        if self._chrome is not None:
-            # 仅数值变化时刷新菜单文案，避免每分钟重建托盘打断正在点的菜单
-            try:
-                key = (int(self.brain.hunger), int(self.brain.fatigue))
-                if key != getattr(self, "_nurture_menu_key", None):
-                    self._nurture_menu_key = key
-                    self._chrome.rebuild_menus()
-            except Exception:
-                pass
+        # 仅数值变化时刷新菜单文案；菜单打开时延后，避免打断点击
+        try:
+            key = (int(self.brain.hunger), int(self.brain.fatigue))
+            if key != getattr(self, "_nurture_menu_key", None):
+                self._nurture_menu_key = key
+                self._chrome_rebuild_menus_safe()
+        except Exception:
+            pass
         if v < 10:
             if not self._nurture_quit_armed:
                 self._nurture_quit_armed = True
@@ -4239,6 +4380,8 @@ class RoachPet:
             return False
         if self._pointer_over_pet or self.dragging or self.right_dragging:
             return True
+        if self._win_cursor_over_window():
+            return True
         return time.time() < float(getattr(self, "_win_keys_until", 0.0) or 0.0)
 
     def _handle_win_key_cmd(self, cmd: str) -> None:
@@ -4246,6 +4389,8 @@ class RoachPet:
         if cmd == "keyesc":
             self.stop()
             return
+        # 成功吃到键后延长窗口，避免焦点在别处时立刻断掉
+        self._win_keys_until = time.time() + 90.0
         self._note_user_act()
         if cmd == "keyspace":
             self._recover_fatigue(10)
@@ -4356,11 +4501,7 @@ class RoachPet:
         on = not self.settings.get("simple_mode", True)
         self.settings["simple_mode"] = on
         save_settings(self.app_root, self.settings)
-        if self._chrome is not None:
-            try:
-                self._chrome.rebuild_menus()
-            except Exception:
-                pass
+        self._chrome_rebuild_menus_safe()
         if on:
             self.say("极简模式开(菜单变短)", urgent=True, life=150)
         else:
@@ -7318,6 +7459,8 @@ class RoachPet:
         self._drain_commands()
         if self._chrome is not None:
             self._chrome.mac_status_tick()
+        if IS_WIN and getattr(self, "_win_menus_dirty", False):
+            self._chrome_rebuild_menus_safe()
         self.bubble = self.bubbles.tick()
 
         self._check_meeting_silence()

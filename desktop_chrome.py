@@ -360,12 +360,14 @@ class DesktopChrome:
         enqueue: Callable[[str], None],
         settings: dict[str, Any],
         win_keys_active: Callable[[], bool] | None = None,
+        win_menu_gate: Callable[[bool], None] | None = None,
         progress: dict[str, Any] | None = None,
     ):
         self._enqueue = enqueue
         self.settings = settings
         self.progress = progress if isinstance(progress, dict) else {}
         self._win_keys_active = win_keys_active
+        self._win_menu_gate = win_menu_gate
         self._hotkey_listener = None
         self._win_focus_keys: WinFocusKeys | None = None
         self._shot_hotkeys: ScreenshotHotkeys | None = None
@@ -825,6 +827,11 @@ class DesktopChrome:
                 add_cmd(menu, "开启极简模式", "toggle_simple_mode")
                 add_cmd(menu, "退出", "quit")
 
+            if self._win_menu_gate is not None:
+                try:
+                    self._win_menu_gate(True)
+                except Exception:
+                    pass
             try:
                 root.update_idletasks()
                 menu.tk_popup(int(screen_x), int(screen_y))
@@ -837,11 +844,21 @@ class DesktopChrome:
                     root.destroy()
                 except Exception:
                     pass
+                if self._win_menu_gate is not None:
+                    try:
+                        self._win_menu_gate(False)
+                    except Exception:
+                        pass
             for cmd in chosen:
                 self._emit(cmd)
             return True
         except Exception as exc:
             print(f"⚠️ Win 弹出菜单失败: {exc}")
+            if self._win_menu_gate is not None:
+                try:
+                    self._win_menu_gate(False)
+                except Exception:
+                    pass
             return False
 
     def _mac_status_button_image(self):
