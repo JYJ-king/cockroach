@@ -15,18 +15,22 @@ class WinFocusKeys:
     """
     Windows：不依赖 pygame 窗口焦点的快捷键桥。
     仅在「鼠标在小猫上 / 刚点过小猫」时生效，避免抢其它窗口的输入。
+    可独立 Listener，也可挂到 CombinedHotkeys（推荐，避免双 Listener）。
     """
 
     def __init__(self, enqueue: Callable[[str], None], is_active: Callable[[], bool]):
         self._enqueue = enqueue
         self._is_active = is_active
         self._listener = None
+        self._attached = False
         self._alt = False
         self._ctrl = False
         self._shift = False
         self._win = False
 
     def start(self) -> None:
+        if self._attached:
+            return
         try:
             from pynput import keyboard
         except ImportError:
@@ -34,18 +38,10 @@ class WinFocusKeys:
             return
 
         def on_press(key):
-            self._update_mods(key, True)
-            if not self._is_active():
-                return
-            # Ctrl+Alt 留给全局热键；Ctrl/Win 单独修饰时不抢单键
-            if self._ctrl or self._win:
-                return
-            cmd = self._map_key(key)
-            if cmd:
-                self._enqueue(cmd)
+            self.on_key(key, True)
 
         def on_release(key):
-            self._update_mods(key, False)
+            self.on_key(key, False)
 
         try:
             self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
@@ -56,13 +52,40 @@ class WinFocusKeys:
             print(f"⚠️ Windows 快捷键桥启动失败: {exc}")
             self._listener = None
 
+    def attach(self) -> None:
+        """挂到 CombinedHotkeys，不再单独开 Listener。"""
+        self._attached = True
+        self._listener = None
+
     def stop(self) -> None:
+        self._attached = False
         try:
             if self._listener is not None:
                 self._listener.stop()
         except Exception:
             pass
         self._listener = None
+
+    def alive(self) -> bool:
+        if self._attached:
+            return True
+        return self._listener is not None
+
+    def on_key(self, key, pressed: bool) -> None:
+        self._update_mods(key, pressed)
+        if not pressed:
+            return
+        if not self._is_active():
+            return
+        # Ctrl+Alt 留给全局热键；Ctrl/Win 单独修饰时不抢单键
+        if self._ctrl or self._win:
+            return
+        cmd = self._map_key(key)
+        if cmd:
+            try:
+                self._enqueue(cmd)
+            except Exception:
+                pass
 
     def _update_mods(self, key, pressed: bool) -> None:
         try:
@@ -250,8 +273,9 @@ class ScreenshotHotkeys:
 
 class CombinedHotkeys:
     """
-    单一 pynput Listener：全局热键和弦 + 截图侦测。
-    macOS 上两个 Listener 并存会 SIGABRT（keycode_context / ObjC）。
+    单一 pynput Listener：全局热键和弦 + 截图侦测（+ Windows 焦点外快捷键）。
+    macOS 上两个 Listener 并存会 SIGABRT（keycode_context / ObjC）；
+    Windows 双 Listener 也常抢钩子导致快捷键全死，故一并合并。
     """
 
     def __init__(
@@ -259,10 +283,12 @@ class CombinedHotkeys:
         enqueue: Callable[[str], None],
         mapping: dict[str, Callable[[], None]] | None,
         shot: ScreenshotHotkeys | None,
+        win_focus: WinFocusKeys | None = None,
     ):
         self._enqueue = enqueue
         self._mapping = mapping or {}
         self._shot = shot
+        self._win_focus = win_focus
         self._listener = None
         self._hotkeys: list = []
 
@@ -280,6 +306,8 @@ class CombinedHotkeys:
             except Exception as exc:
                 print(f"⚠️ 热键无效 {combo}: {exc}")
         self._hotkeys = hotkeys
+        if self._win_focus is not None:
+            self._win_focus.attach()
 
         def on_press(key):
             try:
@@ -293,6 +321,8 @@ class CombinedHotkeys:
                     pass
             if self._shot is not None:
                 self._shot.on_key(key, True)
+            if self._win_focus is not None:
+                self._win_focus.on_key(key, True)
 
         def on_release(key):
             try:
@@ -306,6 +336,8 @@ class CombinedHotkeys:
                     pass
             if self._shot is not None:
                 self._shot.on_key(key, False)
+            if self._win_focus is not None:
+                self._win_focus.on_key(key, False)
 
         try:
             self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
@@ -392,9 +424,9 @@ class DesktopChrome:
         elif IS_WIN:
             threading.Thread(target=self._start_win_tray, daemon=True).start()
             if self._win_keys_active is not None:
+                # 不单独 start：并入 CombinedHotkeys，避免双 Listener 抢钩子
                 self._win_focus_keys = WinFocusKeys(self._enqueue, self._win_keys_active)
-                self._win_focus_keys.start()
-        # 全局热键 + 截图侦测共用一个 Listener（Mac 双 Listener 会 abort）
+        # 全局热键 + 截图侦测 +（Win）焦点外快捷键共用一个 Listener
         self._start_combined_input()
 
     def stop(self) -> None:
@@ -450,9 +482,13 @@ class DesktopChrome:
             pass
 
     def win_focus_keys_alive(self) -> bool:
-        """Windows pynput 焦点外快捷键桥是否可用。"""
+        """Windows 焦点外快捷键桥是否可用（含挂到 CombinedHotkeys 的情况）。"""
         wk = self._win_focus_keys
-        return wk is not None and getattr(wk, "_listener", None) is not None
+        if wk is None:
+            return False
+        if getattr(wk, "_attached", False):
+            return self._combined is not None and getattr(self._combined, "_listener", None) is not None
+        return wk.alive()
 
     def _hotkey_mapping(self) -> dict[str, Callable[[], None]]:
         hk = self.settings.get("hotkeys") or {}
@@ -470,7 +506,8 @@ class DesktopChrome:
     def _start_combined_input(self) -> None:
         want_hotkeys = bool(self.settings.get("global_hotkeys", True))
         want_shot = bool(self.settings.get("meeting_silence", True))
-        if not want_hotkeys and not want_shot:
+        want_win_focus = IS_WIN and self._win_focus_keys is not None
+        if not want_hotkeys and not want_shot and not want_win_focus:
             return
         mapping = self._hotkey_mapping() if want_hotkeys else {}
         if want_shot:
@@ -481,16 +518,28 @@ class DesktopChrome:
         try:
             if self._combined is not None:
                 self._combined.stop()
-            self._combined = CombinedHotkeys(self._enqueue, mapping, shot)
+            self._combined = CombinedHotkeys(
+                self._enqueue,
+                mapping,
+                shot,
+                win_focus=self._win_focus_keys if want_win_focus else None,
+            )
             self._combined.start()
             if self._combined._listener is None:
                 self._combined = None
+                # Combined 失败时，Win 焦点键单独兜底
+                if want_win_focus and self._win_focus_keys is not None:
+                    self._win_focus_keys._attached = False
+                    self._win_focus_keys.start()
                 return
             bits = []
             if want_hotkeys:
                 bits.append("全局热键 Ctrl+Alt+R/…")
             if want_shot:
                 bits.append("截图躲闪")
+            if want_win_focus:
+                bits.append("Win 焦点外快捷键")
+                print("Windows 快捷键: 鼠标放在小猫上（或刚点过）即可按 N/C/Alt+M…")
             print(
                 "输入监听: "
                 + " + ".join(bits)
@@ -499,6 +548,12 @@ class DesktopChrome:
         except Exception as exc:
             print(f"⚠️ 输入监听启动失败: {exc}")
             self._combined = None
+            if want_win_focus and self._win_focus_keys is not None:
+                try:
+                    self._win_focus_keys._attached = False
+                    self._win_focus_keys.start()
+                except Exception:
+                    pass
 
     def _start_hotkeys(self) -> None:
         """兼容旧路径：并入 CombinedHotkeys。"""

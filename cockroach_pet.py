@@ -3801,10 +3801,12 @@ class RoachPet:
 
     def _win_apply_pos(self, force: bool = False):
         """把逻辑坐标写到 HWND，并尽量保持置顶。
-        - 位移：HWND_TOPMOST + 坐标（NOACTIVATE）
-        - 静止：约每 1s 补一次 Z 序（避免每帧抢菜单）
-        - 菜单/系统弹出层打开时：让出置顶，保证可点
-        - Win+D 最小化：RESTORE 后再置顶
+
+        关键点：
+        - pygame.display.update() 常把窗位打回居中 → 每帧用 GetWindowRect 纠偏
+        - 纠坐标默认 NOZORDER，避免每帧 TOPMOST 压死托盘/弹出菜单
+        - 约每 2.5s（或 force）才补一次 HWND_TOPMOST
+        - 菜单打开时：让出置顶，但仍纠坐标
         """
         if not self.hwnd:
             return
@@ -3823,6 +3825,7 @@ class RoachPet:
             WS_EX_TOPMOST = 0x00000008
             SWP_NOSIZE = 0x0001
             SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
             SWP_NOACTIVATE = 0x0010
             SWP_SHOWWINDOW = 0x0040
 
@@ -3830,14 +3833,20 @@ class RoachPet:
             x = int(self.x) + int(ox)
             y = int(self.y) + int(oy)
             now = time.time()
-            last = getattr(self, "_win_last_applied", None)
-            moved = force or last != (x, y)
             yield_ui = self._win_should_yield_topmost()
 
             try:
                 iconic = bool(user32.IsIconic(self.hwnd))
             except Exception:
                 iconic = False
+
+            rect = wintypes.RECT()
+            have_rect = bool(user32.GetWindowRect(self.hwnd, ctypes.byref(rect)))
+            drifted = False
+            if have_rect:
+                drifted = abs(int(rect.left) - x) > 2 or abs(int(rect.top) - y) > 2
+            # 不能只靠 _win_last_applied：SDL 会改 HWND 却不通知我们
+            need_move = bool(force or drifted or iconic)
 
             get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
             set_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
@@ -3861,8 +3870,9 @@ class RoachPet:
                     SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
                 self._win_last_topmost_at = now
+                self._win_yielded_topmost = False
             elif yield_ui:
-                # 托盘/右键菜单打开：让出置顶一次即可，勿每帧 SetWindowPos 抢焦点
+                # 菜单打开：让出置顶；坐标仍要纠，否则 SDL 会把猫钉在屏幕正中
                 if not getattr(self, "_win_yielded_topmost", False):
                     _set_topmost_style(False)
                     user32.SetWindowPos(
@@ -3870,43 +3880,37 @@ class RoachPet:
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                     )
                     self._win_yielded_topmost = True
-                if moved or force:
+                if need_move:
                     user32.SetWindowPos(
-                        self.hwnd, HWND_NOTOPMOST, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOACTIVATE,
+                        self.hwnd, 0, x, y, 0, 0,
+                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
                     )
-                    self._win_last_applied = (x, y)
-                return
             else:
                 self._win_yielded_topmost = False
-                if moved:
-                    _set_topmost_style(True)
+                _set_topmost_style(True)
+                last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
+                bump_z = force or (now - last_top >= 2.5)
+                if need_move and bump_z:
                     user32.SetWindowPos(
                         self.hwnd, HWND_TOPMOST, x, y, 0, 0,
                         SWP_NOSIZE | SWP_NOACTIVATE,
                     )
                     self._win_last_topmost_at = now
-                else:
-                    # 静止：低频补 Z 序，兼顾「不被盖住」与「不抢菜单」
-                    last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
-                    if force or (now - last_top >= 1.0):
-                        _set_topmost_style(True)
-                        user32.SetWindowPos(
-                            self.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                        )
-                        self._win_last_topmost_at = now
+                elif need_move:
+                    # 只纠坐标，不改 Z 序 → 不抢托盘菜单
+                    user32.SetWindowPos(
+                        self.hwnd, 0, x, y, 0, 0,
+                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                    )
+                elif bump_z:
+                    # 无位移：低频补置顶（带坐标，防 SDL 静默回写）
+                    user32.SetWindowPos(
+                        self.hwnd, HWND_TOPMOST, x, y, 0, 0,
+                        SWP_NOSIZE | SWP_NOACTIVATE,
+                    )
+                    self._win_last_topmost_at = now
 
             self._win_last_applied = (x, y)
-
-            if moved or iconic:
-                rect = wintypes.RECT()
-                if user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
-                    if abs(int(rect.left) - x) > 2 or abs(int(rect.top) - y) > 2:
-                        user32.SetWindowPos(
-                            self.hwnd, HWND_TOPMOST, x, y, 0, 0,
-                            SWP_NOSIZE | SWP_NOACTIVATE,
-                        )
         except Exception as exc:
             if not getattr(self, "_win_pos_err_said", False):
                 self._win_pos_err_said = True
@@ -3928,7 +3932,7 @@ class RoachPet:
             from ctypes import wintypes
 
             user32 = ctypes.windll.user32
-            # 任意可见弹出菜单（托盘/右键），不依赖谁是前台
+            # 找可见弹出菜单；仅认真正有尺寸的 #32768，减少误判
             found = ctypes.c_int(0)
 
             @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
@@ -3938,12 +3942,17 @@ class RoachPet:
                         return True
                     buf = ctypes.create_unicode_buffer(64)
                     user32.GetClassNameW(hwnd, buf, 64)
-                    if buf.value == "#32768":
-                        found.value = 1
-                        return False
+                    if buf.value != "#32768":
+                        return True
+                    rc = wintypes.RECT()
+                    if not user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+                        return True
+                    if (int(rc.right) - int(rc.left)) < 8 or (int(rc.bottom) - int(rc.top)) < 8:
+                        return True
+                    found.value = 1
+                    return False
                 except Exception:
-                    pass
-                return True
+                    return True
 
             user32.EnumWindows(_enum, 0)
             if found.value:
@@ -3965,8 +3974,7 @@ class RoachPet:
         except Exception:
             yield_ui = False
         self._win_yield_cache = yield_ui
-        # 菜单打开时更勤检测，关闭后可稍缓
-        self._win_yield_cache_until = now + (0.05 if yield_ui else 0.12)
+        self._win_yield_cache_until = now + (0.05 if yield_ui else 0.15)
         return yield_ui
 
     def _win_set_menu_quiet(self, on: bool) -> None:
@@ -4038,7 +4046,11 @@ class RoachPet:
             rect = wintypes.RECT()
             if not user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
                 return False
-            return bool(user32.PtInRect(ctypes.byref(rect), pt))
+            # 不用 PtInRect：64 位下 POINT 传参易错
+            return (
+                int(rect.left) <= int(pt.x) < int(rect.right)
+                and int(rect.top) <= int(pt.y) < int(rect.bottom)
+            )
         except Exception:
             return False
 
@@ -4380,8 +4392,19 @@ class RoachPet:
             return False
         if self._pointer_over_pet or self.dragging or self.right_dragging:
             return True
+        # 以 HWND 实际矩形为准（逻辑坐标与视觉脱节时仍能按键）
         if self._win_cursor_over_window():
             return True
+        # 逻辑命中：猫在动但窗位尚未跟上的短窗口
+        try:
+            mx, my = self._global_mouse()
+            if (
+                self.x <= mx <= self.x + WIN_W
+                and self.y <= my <= self.y + WIN_H
+            ):
+                return True
+        except Exception:
+            pass
         return time.time() < float(getattr(self, "_win_keys_until", 0.0) or 0.0)
 
     def _handle_win_key_cmd(self, cmd: str) -> None:
@@ -7698,12 +7721,13 @@ class RoachPet:
                                     pass
                             self._running = False
                             break
-                        # pynput 桥失败时回退 pygame 焦点键，与 Mac 本地键能力对齐
+                        # pynput 桥存活且门控开启时走桥；否则回退 pygame（点到猫后窗有焦点）
                         chrome_ok = (
                             self._chrome is not None
                             and self._chrome.win_focus_keys_alive()
                         )
-                        if not chrome_ok:
+                        use_pygame = (not chrome_ok) or (not self._win_keys_active())
+                        if use_pygame:
                             if self._handle_pygame_key(ev):
                                 self._running = False
                                 break
