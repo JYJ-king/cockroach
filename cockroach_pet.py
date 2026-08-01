@@ -1358,25 +1358,33 @@ def canvas_to_nsimage(surface: pygame.Surface):
 
 
 _DESKTOP_SIZE_CACHE: tuple[float, tuple[int, int]] = (0.0, (1280, 800))
+_DESKTOP_ORIGIN_CACHE: tuple[float, tuple[int, int]] = (0.0, (0, 0))
 _LOAD_SAMPLE_CACHE: tuple[float, dict | None] = (0.0, None)
 
 
 def get_desktop_origin() -> tuple[int, int]:
-    """虚拟桌面左上角（多屏时可能为负）；用于 Win SetWindowPos。"""
+    """虚拟桌面左上角（多屏时可能为负）；用于 Win SetWindowPos。缓存约 1 秒。"""
     if not IS_WIN:
         return (0, 0)
+    global _DESKTOP_ORIGIN_CACHE
+    now = time.time()
+    ts, cached = _DESKTOP_ORIGIN_CACHE
+    if now - ts < 1.0:
+        return cached
     try:
         import ctypes
 
         user32 = ctypes.windll.user32
         SM_XVIRTUALSCREEN = 76
         SM_YVIRTUALSCREEN = 77
-        return (
+        origin = (
             int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN)),
             int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN)),
         )
     except Exception:
-        return (0, 0)
+        origin = (0, 0)
+    _DESKTOP_ORIGIN_CACHE = (now, origin)
+    return origin
 
 
 def get_desktop_size() -> tuple[int, int]:
@@ -3800,13 +3808,12 @@ class RoachPet:
         self._win_apply_pos(force=True)
 
     def _win_apply_pos(self, force: bool = False):
-        """把逻辑坐标写到 HWND，并尽量保持置顶。
+        """把逻辑坐标写到 HWND，并保持置顶（轻量，避免拖垮帧率）。
 
         要点：
-        - pygame.display.update() 常把窗位打回居中 → 每帧用 GetWindowRect 纠偏
-        - 非菜单时：每帧 HWND_TOPMOST 写坐标，保证盖在普通窗口之上
-        - 菜单/系统弹出层打开时：让出置顶，但仍纠坐标（NOZORDER）
-        - Win+D 最小化：RESTORE 后再置顶
+        - 仅在 pygame.display.update() 之后调用（SDL 常把窗位打回居中）
+        - 每帧只做坐标纠偏（NOZORDER），不每帧 EnumWindows / TOPMOST
+        - 约每 0.2s 补一次 HWND_TOPMOST；菜单打开时让出
         """
         if not self.hwnd:
             return
@@ -3833,20 +3840,6 @@ class RoachPet:
             x = int(self.x) + int(ox)
             y = int(self.y) + int(oy)
             now = time.time()
-            yield_ui = self._win_should_yield_topmost()
-
-            try:
-                iconic = bool(user32.IsIconic(self.hwnd))
-            except Exception:
-                iconic = False
-
-            rect = wintypes.RECT()
-            have_rect = bool(user32.GetWindowRect(self.hwnd, ctypes.byref(rect)))
-            drifted = False
-            if have_rect:
-                drifted = abs(int(rect.left) - x) > 2 or abs(int(rect.top) - y) > 2
-            # 不能只靠 _win_last_applied：SDL 会改 HWND 却不通知我们
-            need_move = bool(force or drifted or iconic)
 
             get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
             set_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
@@ -3861,6 +3854,22 @@ class RoachPet:
                 except Exception:
                     pass
 
+            try:
+                iconic = bool(user32.IsIconic(self.hwnd))
+            except Exception:
+                iconic = False
+
+            # 菜单：显式 gate，或低频检测系统弹出菜单
+            menu_quiet = bool(getattr(self, "_win_menu_quiet", False))
+            if (not menu_quiet) and time.time() < float(
+                getattr(self, "_win_ui_quiet_until", 0.0) or 0.0
+            ):
+                menu_quiet = True
+            last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
+            due_top = force or iconic or (now - last_top >= 0.2)
+            if due_top and not menu_quiet and self._win_popup_menu_visible():
+                menu_quiet = True
+
             if iconic:
                 _set_topmost_style(True)
                 user32.ShowWindow(self.hwnd, SW_RESTORE)
@@ -3871,8 +3880,7 @@ class RoachPet:
                 )
                 self._win_last_topmost_at = now
                 self._win_yielded_topmost = False
-            elif yield_ui:
-                # 菜单打开：让出置顶；坐标仍要纠，否则 SDL 会把猫钉在屏幕正中
+            elif menu_quiet:
                 if not getattr(self, "_win_yielded_topmost", False):
                     _set_topmost_style(False)
                     user32.SetWindowPos(
@@ -3880,14 +3888,12 @@ class RoachPet:
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                     )
                     self._win_yielded_topmost = True
-                if need_move:
-                    user32.SetWindowPos(
-                        self.hwnd, 0, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-                    )
-            else:
-                # 常态：每帧 HWND_TOPMOST（不抢键盘焦点），保证盖在普通窗口之上。
-                # 托盘/弹出菜单期间走上面 yield 分支，避免点不到菜单。
+                # 菜单期间仍必须纠坐标，否则 SDL 会钉在屏幕正中
+                user32.SetWindowPos(
+                    self.hwnd, 0, x, y, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                )
+            elif due_top:
                 self._win_yielded_topmost = False
                 _set_topmost_style(True)
                 user32.SetWindowPos(
@@ -3895,6 +3901,25 @@ class RoachPet:
                     SWP_NOSIZE | SWP_NOACTIVATE,
                 )
                 self._win_last_topmost_at = now
+            else:
+                # 热路径：只写坐标，不改 Z、不扫窗口 —— 流畅移动的关键
+                self._win_yielded_topmost = False
+                user32.SetWindowPos(
+                    self.hwnd, 0, x, y, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                )
+
+            # SDL 偶发抢回：再读一次，差了就补写
+            rect = wintypes.RECT()
+            if user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
+                if abs(int(rect.left) - x) > 2 or abs(int(rect.top) - y) > 2:
+                    insert = HWND_NOTOPMOST if menu_quiet else (
+                        HWND_TOPMOST if due_top else 0
+                    )
+                    flags = SWP_NOSIZE | SWP_NOACTIVATE
+                    if insert == 0:
+                        flags |= SWP_NOZORDER
+                    user32.SetWindowPos(self.hwnd, insert, x, y, 0, 0, flags)
 
             self._win_last_applied = (x, y)
         except Exception as exc:
@@ -3902,23 +3927,18 @@ class RoachPet:
                 self._win_pos_err_said = True
                 print(f"⚠️ Win 窗位更新失败: {exc}")
 
-    def _win_should_yield_topmost(self) -> bool:
-        """菜单/系统弹出层打开时不要抢 Z 序。"""
-        if getattr(self, "_win_menu_quiet", False):
-            return True
-        if time.time() < float(getattr(self, "_win_ui_quiet_until", 0.0) or 0.0):
-            return True
+    def _win_popup_menu_visible(self) -> bool:
+        """是否有可见系统弹出菜单（托盘等）。带缓存，勿每帧 EnumWindows。"""
         now = time.time()
         cache_until = float(getattr(self, "_win_yield_cache_until", 0.0) or 0.0)
         if now < cache_until:
             return bool(getattr(self, "_win_yield_cache", False))
-        yield_ui = False
+        found_vis = False
         try:
             import ctypes
             from ctypes import wintypes
 
             user32 = ctypes.windll.user32
-            # 找可见弹出菜单；仅认真正有尺寸的 #32768，减少误判
             found = ctypes.c_int(0)
 
             @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
@@ -3941,27 +3961,20 @@ class RoachPet:
                     return True
 
             user32.EnumWindows(_enum, 0)
-            if found.value:
-                yield_ui = True
-            else:
-                fg = user32.GetForegroundWindow()
-                if fg:
-                    buf = ctypes.create_unicode_buffer(256)
-                    user32.GetClassNameW(fg, buf, 256)
-                    cls = buf.value or ""
-                    if cls == "#32768":
-                        yield_ui = True
-                    else:
-                        pid = wintypes.DWORD()
-                        user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
-                        my_pid = int(ctypes.windll.kernel32.GetCurrentProcessId())
-                        if int(pid.value) == my_pid and cls.startswith("Tk"):
-                            yield_ui = True
+            found_vis = bool(found.value)
         except Exception:
-            yield_ui = False
-        self._win_yield_cache = yield_ui
-        self._win_yield_cache_until = now + (0.05 if yield_ui else 0.15)
-        return yield_ui
+            found_vis = False
+        self._win_yield_cache = found_vis
+        self._win_yield_cache_until = now + (0.08 if found_vis else 0.25)
+        return found_vis
+
+    def _win_should_yield_topmost(self) -> bool:
+        """菜单打开时不要抢 Z 序（供 rebuild_menus 等）。"""
+        if getattr(self, "_win_menu_quiet", False):
+            return True
+        if time.time() < float(getattr(self, "_win_ui_quiet_until", 0.0) or 0.0):
+            return True
+        return self._win_popup_menu_visible()
 
     def _win_set_menu_quiet(self, on: bool) -> None:
         """Chrome 弹出菜单时调用：让出置顶，结束后恢复。"""
@@ -7483,8 +7496,7 @@ class RoachPet:
             sx, sy = self._screen_pos()
             if IS_MAC and self.window is not None:
                 self._mac_place_window(sx, sy)
-            elif IS_WIN:
-                self._win_apply_pos()
+            # Win：窗位只在 paint→display.update 之后写，避免与 SDL 打架、并省掉双倍 SetWindowPos
             self._update_mouse_passthrough()
             self.paint()
             self._refresh_view()
@@ -7606,8 +7618,7 @@ class RoachPet:
         sx, sy = self._screen_pos()
         if IS_MAC and self.window is not None:
             self._mac_place_window(sx, sy)
-        elif IS_WIN:
-            self._win_apply_pos()
+        # Win：窗位只在 paint 末尾写（update 之后），见 _win_apply_pos
         self._update_mouse_passthrough()
         self.paint()
         self._refresh_view()
