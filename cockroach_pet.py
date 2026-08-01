@@ -3802,11 +3802,11 @@ class RoachPet:
     def _win_apply_pos(self, force: bool = False):
         """把逻辑坐标写到 HWND，并尽量保持置顶。
 
-        关键点：
+        要点：
         - pygame.display.update() 常把窗位打回居中 → 每帧用 GetWindowRect 纠偏
-        - 纠坐标默认 NOZORDER，避免每帧 TOPMOST 压死托盘/弹出菜单
-        - 约每 2.5s（或 force）才补一次 HWND_TOPMOST
-        - 菜单打开时：让出置顶，但仍纠坐标
+        - 非菜单时：每帧 HWND_TOPMOST 写坐标，保证盖在普通窗口之上
+        - 菜单/系统弹出层打开时：让出置顶，但仍纠坐标（NOZORDER）
+        - Win+D 最小化：RESTORE 后再置顶
         """
         if not self.hwnd:
             return
@@ -3886,29 +3886,15 @@ class RoachPet:
                         SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
                     )
             else:
+                # 常态：每帧 HWND_TOPMOST（不抢键盘焦点），保证盖在普通窗口之上。
+                # 托盘/弹出菜单期间走上面 yield 分支，避免点不到菜单。
                 self._win_yielded_topmost = False
                 _set_topmost_style(True)
-                last_top = float(getattr(self, "_win_last_topmost_at", 0.0) or 0.0)
-                bump_z = force or (now - last_top >= 2.5)
-                if need_move and bump_z:
-                    user32.SetWindowPos(
-                        self.hwnd, HWND_TOPMOST, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOACTIVATE,
-                    )
-                    self._win_last_topmost_at = now
-                elif need_move:
-                    # 只纠坐标，不改 Z 序 → 不抢托盘菜单
-                    user32.SetWindowPos(
-                        self.hwnd, 0, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-                    )
-                elif bump_z:
-                    # 无位移：低频补置顶（带坐标，防 SDL 静默回写）
-                    user32.SetWindowPos(
-                        self.hwnd, HWND_TOPMOST, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOACTIVATE,
-                    )
-                    self._win_last_topmost_at = now
+                user32.SetWindowPos(
+                    self.hwnd, HWND_TOPMOST, x, y, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+                self._win_last_topmost_at = now
 
             self._win_last_applied = (x, y)
         except Exception as exc:
@@ -6964,8 +6950,7 @@ class RoachPet:
                 if self._chrome.pop_context_menu(event=event):
                     return True
             else:
-                # Win pygame 事件：用当前光标屏幕坐标
-                if self._chrome.pop_context_menu():
+                if self._chrome.pop_context_menu(hwnd=getattr(self, "hwnd", None)):
                     return True
         if IS_MAC:
             if meta and alt and event is not None:

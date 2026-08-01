@@ -784,7 +784,7 @@ class DesktopChrome:
             print(f"⚠️ 弹出菜单失败: {exc}")
             return False
 
-    def pop_context_menu(self, screen_x: int | None = None, screen_y: int | None = None, event=None) -> bool:
+    def pop_context_menu(self, screen_x: int | None = None, screen_y: int | None = None, event=None, hwnd=None) -> bool:
         """双端：在指针旁弹出与菜单栏/托盘同结构的菜单（Ctrl+Shift+点小猫）。"""
         if IS_MAC:
             if event is not None:
@@ -805,116 +805,189 @@ class DesktopChrome:
                 print(f"⚠️ 弹出菜单失败: {exc}")
                 return False
         if IS_WIN:
-            return self._pop_win_context_menu(screen_x, screen_y)
+            return self._pop_win_context_menu(screen_x, screen_y, hwnd=hwnd)
         return False
 
-    def _pop_win_context_menu(self, screen_x: int | None, screen_y: int | None) -> bool:
-        """Windows：用 tkinter 在指针处弹出与托盘同结构的菜单。"""
-        try:
-            import tkinter as tk
-        except ImportError:
-            print("⚠️ 缺少 tkinter，无法弹出菜单；请用任务栏托盘")
-            return False
-        try:
-            if screen_x is None or screen_y is None:
-                import ctypes
-                from ctypes import wintypes
-
-                class POINT(ctypes.Structure):
-                    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
-
-                pt = POINT()
-                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-                screen_x, screen_y = int(pt.x), int(pt.y)
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            menu = tk.Menu(root, tearoff=0)
-            chosen: list[str] = []
-
-            def add_cmd(parent, title: str, cmd: str) -> None:
-                # 先记下选项，菜单销毁后再 _emit，避免 destroy 打断回调
-                parent.add_command(
-                    label=self._menu_label(title, cmd),
-                    command=lambda c=cmd: chosen.append(c),
-                )
-
-            def add_cascade(parent, title: str, rows: tuple) -> None:
-                sub = tk.Menu(parent, tearoff=0)
-                for row in rows:
-                    if row is None:
-                        sub.add_separator()
-                    else:
-                        add_cmd(sub, row[0], row[1])
-                parent.add_cascade(label=title, menu=sub)
-
-            if self._simple():
-                for title, cmd in self._PRIMARY_SIMPLE:
-                    add_cmd(menu, title, cmd)
-                menu.add_separator()
-                add_cascade(menu, "更多互动", self._MORE_INTERACT)
-                add_cascade(menu, "更多设置", self._MORE_SETTINGS)
-                menu.add_separator()
-                add_cmd(menu, "关闭极简模式", "toggle_simple_mode")
-                add_cmd(menu, "退出", "quit")
+    def _win_context_menu_spec(self) -> list:
+        """生成 Win 弹出菜单结构：('cmd', title, cmd) / ('sep',) / ('sub', title, rows)。"""
+        if self._simple():
+            rows: list = [("cmd", t, c) for t, c in self._PRIMARY_SIMPLE]
+            rows += [
+                ("sep",),
+                ("sub", "更多互动", self._MORE_INTERACT),
+                ("sub", "更多设置", self._MORE_SETTINGS),
+                ("sep",),
+                ("cmd", "关闭极简模式", "toggle_simple_mode"),
+                ("cmd", "退出", "quit"),
+            ]
+            return rows
+        rows = [
+            ("cmd", "召唤过来", "call"),
+            ("cmd", "摸头", "pet"),
+            ("cmd", "投喂", "feed"),
+            ("cmd", "纸箱", "box"),
+            ("cmd", "睡觉", "sleep"),
+            ("cmd", "系统总览", "overview"),
+            ("cmd", "状态", "status"),
+            ("sep",),
+        ]
+        for row in self._MORE_SETTINGS:
+            if row is None:
+                rows.append(("sep",))
             else:
-                add_cmd(menu, "召唤过来", "call")
-                add_cmd(menu, "摸头", "pet")
-                add_cmd(menu, "投喂", "feed")
-                add_cmd(menu, "纸箱", "box")
-                add_cmd(menu, "睡觉", "sleep")
-                add_cmd(menu, "系统总览", "overview")
-                add_cmd(menu, "状态", "status")
-                menu.add_separator()
-                for row in self._MORE_SETTINGS:
-                    if row is None:
-                        menu.add_separator()
-                    else:
-                        add_cmd(menu, row[0], row[1])
-                menu.add_separator()
-                for row in self._MORE_INTERACT:
-                    if row is None:
-                        menu.add_separator()
-                    else:
-                        add_cmd(menu, row[0], row[1])
-                menu.add_separator()
-                add_cmd(menu, "开启极简模式", "toggle_simple_mode")
-                add_cmd(menu, "退出", "quit")
+                rows.append(("cmd", row[0], row[1]))
+        rows.append(("sep",))
+        for row in self._MORE_INTERACT:
+            if row is None:
+                rows.append(("sep",))
+            else:
+                rows.append(("cmd", row[0], row[1]))
+        rows += [
+            ("sep",),
+            ("cmd", "开启极简模式", "toggle_simple_mode"),
+            ("cmd", "退出", "quit"),
+        ]
+        return rows
+
+    def _pop_win_context_menu(
+        self,
+        screen_x: int | None,
+        screen_y: int | None,
+        hwnd=None,
+    ) -> bool:
+        """Windows：原生 TrackPopupMenu（避免 tk+pygame 置顶窗抢点击导致菜单无效）。"""
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+
+        MF_STRING = 0x00000000
+        MF_POPUP = 0x00000010
+        MF_SEPARATOR = 0x00000800
+        TPM_LEFTALIGN = 0x0000
+        TPM_RIGHTBUTTON = 0x0002
+        TPM_RETURNCMD = 0x0100
+        TPM_NONOTIFY = 0x0080
+        WM_NULL = 0x0000
+
+        if screen_x is None or screen_y is None:
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            screen_x, screen_y = int(pt.x), int(pt.y)
+
+        owner = int(hwnd) if hwnd else 0
+        id_to_cmd: dict[int, str] = {}
+        next_id = 1000
+
+        def _append_rows(hmenu: int, rows) -> None:
+            nonlocal next_id
+            for item in rows:
+                kind = item[0]
+                if kind == "sep":
+                    user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+                elif kind == "cmd":
+                    _title, cmd = item[1], item[2]
+                    mid = next_id
+                    next_id += 1
+                    id_to_cmd[mid] = cmd
+                    label = self._menu_label(_title, cmd)
+                    user32.AppendMenuW(hmenu, MF_STRING, mid, label)
+                elif kind == "sub":
+                    title, sub_rows = item[1], item[2]
+                    sub = int(user32.CreatePopupMenu() or 0)
+                    if not sub:
+                        continue
+                    for row in sub_rows:
+                        if row is None:
+                            user32.AppendMenuW(sub, MF_SEPARATOR, 0, None)
+                        else:
+                            mid = next_id
+                            next_id += 1
+                            id_to_cmd[mid] = row[1]
+                            user32.AppendMenuW(
+                                sub, MF_STRING, mid, self._menu_label(row[0], row[1])
+                            )
+                    # MF_POPUP：uIDNewItem 为子菜单句柄（DestroyMenu 根菜单时一并释放）
+                    user32.AppendMenuW(hmenu, MF_POPUP, sub, title)
+
+        gate_on = False
+        hmenu = 0
+        try:
+            user32.AppendMenuW.argtypes = [
+                wintypes.HMENU,
+                wintypes.UINT,
+                ctypes.c_size_t,
+                wintypes.LPCWSTR,
+            ]
+            user32.AppendMenuW.restype = wintypes.BOOL
+            user32.CreatePopupMenu.restype = wintypes.HMENU
+            user32.TrackPopupMenuEx.argtypes = [
+                wintypes.HMENU,
+                wintypes.UINT,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.HWND,
+                ctypes.c_void_p,
+            ]
+            user32.TrackPopupMenuEx.restype = ctypes.c_uint
 
             if self._win_menu_gate is not None:
                 try:
                     self._win_menu_gate(True)
+                    gate_on = True
                 except Exception:
                     pass
-            try:
-                root.update_idletasks()
-                menu.tk_popup(int(screen_x), int(screen_y))
-            finally:
+
+            hmenu = int(user32.CreatePopupMenu() or 0)
+            if not hmenu:
+                raise OSError("CreatePopupMenu failed")
+            _append_rows(hmenu, self._win_context_menu_spec())
+
+            # 主人窗须存在且可前台，否则菜单点选/点外侧关闭会异常
+            if owner:
                 try:
-                    menu.grab_release()
+                    user32.SetForegroundWindow(owner)
                 except Exception:
                     pass
+            flags = TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY
+            chosen_id = int(
+                user32.TrackPopupMenuEx(
+                    hmenu,
+                    flags,
+                    int(screen_x),
+                    int(screen_y),
+                    owner or user32.GetDesktopWindow(),
+                    None,
+                )
+                or 0
+            )
+            if owner:
                 try:
-                    root.destroy()
+                    user32.PostMessageW(owner, WM_NULL, 0, 0)
                 except Exception:
                     pass
-                if self._win_menu_gate is not None:
-                    try:
-                        self._win_menu_gate(False)
-                    except Exception:
-                        pass
-            for cmd in chosen:
+
+            cmd = id_to_cmd.get(chosen_id)
+            if cmd:
                 self._emit(cmd)
             return True
         except Exception as exc:
             print(f"⚠️ Win 弹出菜单失败: {exc}")
-            if self._win_menu_gate is not None:
+            return False
+        finally:
+            if hmenu:
+                try:
+                    user32.DestroyMenu(hmenu)
+                except Exception:
+                    pass
+            if gate_on and self._win_menu_gate is not None:
                 try:
                     self._win_menu_gate(False)
                 except Exception:
                     pass
-            return False
 
     def _mac_status_button_image(self):
         """菜单栏图标：多符号回退 + 字号，避免 Tahoe 上 symbol 缺失导致零宽度。"""
